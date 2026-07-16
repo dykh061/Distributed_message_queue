@@ -73,11 +73,17 @@ func (broker *Broker) processBrokerMessage(message *Message) (*Message, error) {
 		}
 		return &Message{RESPONSE_PRODUCER_REGISTER: resp}, nil
 	}
+	if message.CONSUMER_REGISTER != nil {
+		resp, err := broker.processConsumerGroupConsump(message.CONSUMER_REGISTER)
+		if err != nil {
+			return nil, err
+		}
+		return &Message{RESPONSE_CONSUMER_REGISTER: resp}, nil
+	}
 	return nil, nil
 }
 
 func (broker *Broker) processProducerPCM(pcm_message []byte, idx int) (*byte, error) {
-
 	broker.topics[idx].mq.push(pcm_message)
 	broker.topics[idx].mq.debug()
 	var ack byte = 0
@@ -86,6 +92,88 @@ func (broker *Broker) processProducerPCM(pcm_message []byte, idx int) (*byte, er
 
 func (broker *Broker) processEchoMessage(echo_message *string) (string, error) {
 	return fmt.Sprintf("I have receive : %s", *echo_message), nil
+}
+
+func (broker *Broker) processConsumerGroupConsump(consumer_register_message *ConsumerRegister) (*byte, error) {
+	var topic_idx int = -1
+	if len(broker.topics) == 0 {
+		ntopic := &Topic{}
+		ntopic.init(consumer_register_message.topicID)
+		broker.topics = append(broker.topics, *ntopic)
+		topic_idx = len(broker.topics) - 1
+	} else {
+		for index, tp := range broker.topics {
+			if tp.TopicID == consumer_register_message.topicID {
+				topic_idx = index
+				break
+			}
+		}
+		if topic_idx == -1 {
+			ntopic := &Topic{}
+			ntopic.init(consumer_register_message.topicID)
+			broker.topics = append(broker.topics, *ntopic)
+			topic_idx = len(broker.topics) - 1
+		}
+	}
+	var cgroup_idx int = -1
+	if len(broker.topics[topic_idx].cgroups) == 0 {
+		ncgroup := &CGroup{}
+		ncgroup.init(consumer_register_message.groupID)
+		broker.topics[topic_idx].cgroups = append(broker.topics[topic_idx].cgroups, *ncgroup)
+		cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
+	} else {
+		for index, cg := range broker.topics[topic_idx].cgroups {
+			if cg.cgroupId == consumer_register_message.groupID {
+				cgroup_idx = index
+				break
+			}
+		}
+		if cgroup_idx == -1 {
+			ncgroup := &CGroup{}
+			ncgroup.init(consumer_register_message.groupID)
+			broker.topics[topic_idx].cgroups = append(broker.topics[topic_idx].cgroups, *ncgroup)
+			cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
+		}
+	}
+	go func() {
+		conn, err := net.Dial("tcp", fmt.Sprintf(":%d", consumer_register_message.port))
+		if err != nil {
+			panic(err)
+		}
+		defer conn.Close()
+		broker.topics[topic_idx].cgroups[cgroup_idx].consumers = append(
+			broker.topics[topic_idx].cgroups[cgroup_idx].consumers,
+			Consumers{status: true, conn: conn},
+		)
+		for {
+			offset := broker.topics[topic_idx].cgroups[cgroup_idx].offset
+			data := broker.topics[topic_idx].mq.peek(uint(offset))
+			if data == nil {
+				continue
+			}
+			for _, consumer := range broker.topics[topic_idx].cgroups[cgroup_idx].consumers {
+				if consumer.status == true {
+					stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+					consumer.status = false
+					err := WriteMessageToStream(stream_rw, &Message{PCM: data})
+					if err != nil {
+						panic(err)
+					}
+					resp, err := ReadMessageFromStream(stream_rw)
+					if err != nil {
+						panic(err)
+					}
+					if resp.RESPONSE_CONSUMER_REGISTER != nil {
+						consumer.status = true
+						broker.topics[topic_idx].cgroups[cgroup_idx].offset += 1
+					}
+				}
+			}
+		}
+	}()
+	var resp byte = 0
+	return &resp, nil
+
 }
 
 // Khi nhận được message có thuộc tính PRODUCER_REGISTER
@@ -105,12 +193,12 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 				topic_idx = index
 				break
 			}
-			if topic_idx == -1 {
-				ntopic := &Topic{}
-				ntopic.init(producer_register_message.topicID)
-				broker.topics = append(broker.topics, *ntopic)
-				topic_idx = len(broker.topics) - 1
-			}
+		}
+		if topic_idx == -1 {
+			ntopic := &Topic{}
+			ntopic.init(producer_register_message.topicID)
+			broker.topics = append(broker.topics, *ntopic)
+			topic_idx = len(broker.topics) - 1
 		}
 	}
 	go func() { // dial to the producer and send a message to it to confirm the registration

@@ -28,7 +28,23 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		producer := &Producer{}
-		producer.StartProducerServer(uint16(port), uint16(topicID))
+		producer := &Producer{
+			port:    uint16(port),
+			topicID: uint16(topicID),
+		}
+		producer.StartProducerServer()
+	case "consumer":
+		port, err := strconv.ParseInt(os.Args[2], 10, 32)
+		topicID, err := strconv.ParseInt(os.Args[3], 10, 32)
+		groupID, err := strconv.ParseInt(os.Args[4], 10, 32)
+		if err != nil {
+			panic(err)
+		}
+		consumer := &Consumer{
+			port:    uint16(port),
+			topicID: uint16(topicID),
+			groupID: uint16(groupID),
+		}
+		consumer.StartConsumerServer()
 	}
 }

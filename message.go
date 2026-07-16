@@ -14,24 +14,35 @@ const (
 	ECHO              = 1
 	PRODUCER_REGISTER = 2
 	PCM               = 3 // Producer Consumer Message
+	CONSUMER_REGISTER = 4
+	COMMIT_OFFSET     = 5
 	// other message types can be added here
 
 	// ACK
 	RESPONSE_ECHO              = 101
 	RESPONSE_PRODUCER_REGISTER = 102
 	R_PCM                      = 103
+	RESPONSE_CONSUMER_REGISTER = 104
 )
 
 type Message struct {
 	ECHO              *string
 	PRODUCER_REGISTER *ProducerRegister
 	PCM               []byte
+	CONSUMER_REGISTER *ConsumerRegister
+	COMMIT_OFFSET     *CommitOffset
 	// other message types can be added here
 
 	// ACK
 	RESPONSE_ECHO              *string
 	RESPONSE_PRODUCER_REGISTER *byte
 	R_PCM                      *byte
+	RESPONSE_CONSUMER_REGISTER *byte
+}
+type CommitOffset struct {
+	TopicID uint16
+	GroupID uint16
+	Offset  uint32
 }
 
 type ProducerRegister struct {
@@ -57,6 +68,30 @@ func (pr *ProducerRegister) fromByte(data []byte) { // fromByte thì dùng để
 	pr.topicID = uint16(data[2])<<8 + uint16(data[3]) // shift left 8 bits để đưa 8 bit đầu về đúng vị trí và cộng với 8 bit cuối để lấy ra giá trị topicID
 }
 
+type ConsumerRegister struct {
+	port    uint16
+	topicID uint16
+	groupID uint16
+}
+
+func (cr *ConsumerRegister) toByte() []byte {
+	var data [6]byte
+	data[0] = byte(cr.port >> 8)   // shift right 8 bits để lấy 8 bit đầu tiên của port và lưu vào data[0]
+	data[1] = byte(cr.port & 0xFF) // lấy and 0xFF để lấy 8 bit cuối cùng của port và lưu vào data[1]
+
+	data[2] = byte(cr.topicID >> 8)   // tương tự như trên, shift right 8 bits để lấy 8 bit đầu tiên của topicID và lưu vào data[2]
+	data[3] = byte(cr.topicID & 0xFF) // lấy and 0xFF để lấy 8 bit cuối cùng của topicID và lưu vào data[3]
+
+	data[4] = byte(cr.groupID >> 8)   // tương tự như trên, shift right 8 bits để lấy 8 bit đầu tiên của groupID và lưu vào data[4]
+	data[5] = byte(cr.groupID & 0xFF) // lấy and 0xFF để lấy 8 bit cuối cùng của groupID và lưu vào data[5]
+	return data[0:6]
+}
+
+func (cr *ConsumerRegister) fromByte(data []byte) {
+	cr.port = uint16(data[0])<<8 + uint16(data[1])    // shift left 8 bits để đưa 8 bit đầu về đúngv vị trí và cộng với 8 bit cuối để lấy ra giá trị port
+	cr.topicID = uint16(data[2])<<8 + uint16(data[3]) // shift left 8 bits để đưa 8 bit đầu về đúng vị trí và cộng với 8 bit cuối để lấy ra giá trị topicID
+	cr.groupID = uint16(data[4])<<8 + uint16(data[5]) // shift left 8 bits để đưa 8 bit đầu về đúng vị trí và cộng với 8 bit cuối để lấy ra giá trị groupID
+}
 func readFromStream(stream_rd *bufio.ReadWriter) ([]byte, error) {
 	var err error
 	header, err := stream_rd.ReadByte()
@@ -84,7 +119,12 @@ func parseMessage(stream_message []byte) *Message {
 		// convert và tạo 1 Message mới với ECHO là string từ byte thứ 2 trở đi
 		var st = string(stream_message[1:])
 		return &Message{ECHO: &st}
-
+	case COMMIT_OFFSET:
+		var co = &CommitOffset{}
+		co.TopicID = uint16(stream_message[1])<<8 + uint16(stream_message[2])
+		co.GroupID = uint16(stream_message[3])<<8 + uint16(stream_message[4])
+		co.Offset = uint32(stream_message[5])<<24 + uint32(stream_message[6])<<16 + uint32(stream_message[7])<<8 + uint32(stream_message[8])
+		return &Message{COMMIT_OFFSET: co}
 	case RESPONSE_ECHO:
 		var st = string(stream_message[1:])
 		return &Message{RESPONSE_ECHO: &st}
@@ -103,6 +143,15 @@ func parseMessage(stream_message []byte) *Message {
 	case R_PCM:
 		var st = stream_message[1]
 		return &Message{R_PCM: &st}
+	case CONSUMER_REGISTER:
+		var cr = &ConsumerRegister{}
+		cr.fromByte(stream_message[1:])
+		return &Message{
+			CONSUMER_REGISTER: cr,
+		}
+	case RESPONSE_CONSUMER_REGISTER:
+		var st = stream_message[1]
+		return &Message{RESPONSE_CONSUMER_REGISTER: &st}
 	default:
 		return nil
 	}
@@ -140,9 +189,33 @@ func writeDataToStreamWithType(stream_wt *bufio.ReadWriter, messageType byte, da
 	return nil
 }
 
-func WriteMessageRegisterToStream(stream_wt *bufio.ReadWriter, messageType byte, data *ProducerRegister) error {
+func WriteMessageProducerRegisterToStream(stream_wt *bufio.ReadWriter, messageType byte, data *ProducerRegister) error {
 	prData := data.toByte()
 	if err := writeDataToStreamWithType(stream_wt, PRODUCER_REGISTER, string(prData)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func WriteMessageConsumerRegisterToStream(stream_wt *bufio.ReadWriter, messageType byte, data *ConsumerRegister) error {
+	crData := data.toByte()
+	if err := writeDataToStreamWithType(stream_wt, CONSUMER_REGISTER, string(crData)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func WriteMessageCommitOffsetToStream(stream_wt *bufio.ReadWriter, messageType byte, data *CommitOffset) error {
+	var coData [8]byte
+	coData[0] = byte(data.TopicID >> 8)
+	coData[1] = byte(data.TopicID & 0xFF)
+	coData[2] = byte(data.GroupID >> 8)
+	coData[3] = byte(data.GroupID & 0xFF)
+	coData[4] = byte(data.Offset >> 24)
+	coData[5] = byte((data.Offset >> 16) & 0xFF)
+	coData[6] = byte((data.Offset >> 8) & 0xFF)
+	coData[7] = byte(data.Offset & 0xFF)
+	if err := writeDataToStreamWithType(stream_wt, COMMIT_OFFSET, string(coData[:])); err != nil {
 		return err
 	}
 	return nil
@@ -174,6 +247,12 @@ func WriteMessageToStream(stream_wt *bufio.ReadWriter, message *Message) error {
 	if message.R_PCM != nil {
 		data := fmt.Sprintf("%d", *message.R_PCM)
 		if err := writeDataToStreamWithType(stream_wt, R_PCM, data); err != nil {
+			return err
+		}
+	}
+	if message.RESPONSE_CONSUMER_REGISTER != nil {
+		data := fmt.Sprintf("%d", *message.RESPONSE_CONSUMER_REGISTER)
+		if err := writeDataToStreamWithType(stream_wt, RESPONSE_CONSUMER_REGISTER, data); err != nil {
 			return err
 		}
 	}
