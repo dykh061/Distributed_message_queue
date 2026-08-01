@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"time"
 )
 
 type Consumer struct {
-	port    uint16
-	topicID uint16
-	groupID uint16
+	port       uint16
+	topicID    uint16
+	groupID    uint16
+	assignment []uint16
+	generation uint16
 }
 
 // Kết nối tới Broker.
@@ -35,7 +36,7 @@ func (consumer *Consumer) registerWithBroker() error {
 		},
 	}
 
-	err = WriteMessageConsumerRegisterToStream(stream_rw, CONSUMER_REGISTER, message.CONSUMER_REGISTER)
+	err = WriteSerializableToStream(stream_rw, CONSUMER_REGISTER, message.CONSUMER_REGISTER)
 	if err != nil {
 		return err
 	}
@@ -85,21 +86,30 @@ func (consumer *Consumer) StartConsumerServer() error {
 		resp, err := ReadMessageFromStream(stream_rw)
 		if err != nil {
 			log.Println(err)
-			break
+			continue
 		}
 		if resp != nil {
-			var ack = byte(1) // ACK
-			str := string(resp.PCM)
-			fmt.Printf("Consumer received message: %s\n", str)
-			err := WriteMessageToStream(stream_rw, &Message{RESPONSE_CONSUMER_REGISTER: &ack})
-			if err != nil {
-				log.Println(err)
-				break
+			if resp.ASSIGNMENT != nil {
+				consumer.assignment = resp.ASSIGNMENT.Partitions
+				consumer.generation += 1
+				var ack = byte(1)
+				fmt.Printf("Consumer updated assignment to version %d:", consumer.generation)
+				err := WriteMessageToStream(stream_rw, &Message{ASSIGNMENT_ACK: &ack})
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+				for _, partitionID := range consumer.assignment {
+					go func(partitionID uint16) {
+						if consumer
+					}(partitionID)
+				}
 			}
-		} else {
-			time.Sleep(5 * time.Second)
-			fmt.Println("No message received, waiting for 5 seconds before checking again...")
 		}
 	}
-	return err
+	return nil
+}
+
+func (consumer *Consumer) fetchMessages() {
+
 }

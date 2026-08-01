@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -14,7 +15,7 @@ type Broker struct {
 }
 
 func (broker *Broker) init() {
-	broker.topics = make([]Topic, 0, 10)
+	broker.topics = make([]Topic, 0)
 }
 
 // Khởi động server broker và lắng nghe các kết nối đến port
@@ -84,8 +85,13 @@ func (broker *Broker) processBrokerMessage(message *Message) (*Message, error) {
 }
 
 func (broker *Broker) processProducerPCM(pcm_message []byte, idx int) (*byte, error) {
-	broker.topics[idx].mq.push(pcm_message)
-	broker.topics[idx].mq.debug()
+	partition := broker.topics[idx].selectNextPartition()
+	if partition == nil {
+		err := errors.New("No partition available for topic")
+		return nil, err
+	}
+	partition.mq.push(pcm_message)
+	partition.mq.debug()
 	var ack byte = 0
 	return &ack, nil
 }
@@ -143,37 +149,55 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 		defer conn.Close()
 		broker.topics[topic_idx].cgroups[cgroup_idx].consumers = append(
 			broker.topics[topic_idx].cgroups[cgroup_idx].consumers,
-			Consumers{status: true, conn: conn},
+			Consumers{conn: conn},
 		)
-		for {
-			offset := broker.topics[topic_idx].cgroups[cgroup_idx].offset
-			data := broker.topics[topic_idx].mq.peek(uint(offset))
-			if data == nil {
-				continue
-			}
-			for _, consumer := range broker.topics[topic_idx].cgroups[cgroup_idx].consumers {
-				if consumer.status == true {
-					stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-					consumer.status = false
-					err := WriteMessageToStream(stream_rw, &Message{PCM: data})
-					if err != nil {
-						panic(err)
-					}
-					resp, err := ReadMessageFromStream(stream_rw)
-					if err != nil {
-						panic(err)
-					}
-					if resp.RESPONSE_CONSUMER_REGISTER != nil {
-						consumer.status = true
-						broker.topics[topic_idx].cgroups[cgroup_idx].offset += 1
-					}
-				}
-			}
-		}
+		broker.topics[topic_idx].rebalanceConsumerGroup(cgroup_idx)
+		broker.sendAssignmentToConsumerGroup(topic_idx, cgroup_idx)
+		go broker.handleConsumerConnection(topic_idx, cgroup_idx, conn)
 	}()
 	var resp byte = 0
 	return &resp, nil
 
+	// giờ mình cần phải làm sao để gửi assiment cho từng consumer biết mỗi khi rebalance xong thì nó tự pull log về mà đọc
+	// sau đó nó commit offset về cho broker biết là nó đã đọc đến đâu rồi
+
+}
+
+func (broker *Broker) handleConsumerConnection(topic_idx, cgroup_idx int, conn net.Conn) error {
+	for {
+		stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+		resp, err := ReadMessageFromStream(stream_rw)
+		if err != nil {
+			panic(err)
+		}
+		if resp != nil {
+			if resp.ASSIGNMENT_ACK != nil {
+				fmt.Printf("Consumer acknowledged assignment")
+			}
+		}
+	}
+	return nil
+}
+
+func (broker *Broker) sendAssignmentToConsumerGroup(topic_idx, cgroup_idx int) error {
+	var err error
+
+	group := &broker.topics[topic_idx].cgroups[cgroup_idx]
+
+	for _, consumer := range group.consumers {
+		stream_rw := bufio.NewReadWriter(bufio.NewReader(consumer.conn), bufio.NewWriter(consumer.conn))
+		ass := &Message{
+			ASSIGNMENT: &Assignment{
+				Partitions: consumer.partitions,
+			},
+		}
+		err = WriteMessageToStream(stream_rw, ass)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return err
 }
 
 // Khi nhận được message có thuộc tính PRODUCER_REGISTER

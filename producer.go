@@ -33,7 +33,7 @@ func (producer *Producer) registerWithBroker() error {
 		},
 	}
 
-	err = WriteMessageProducerRegisterToStream(stream_rw, PRODUCER_REGISTER, message.PRODUCER_REGISTER)
+	err = WriteSerializableToStream(stream_rw, PRODUCER_REGISTER, message.PRODUCER_REGISTER)
 	if err != nil {
 		return err
 	}

@@ -16,6 +16,8 @@ const (
 	PCM               = 3 // Producer Consumer Message
 	CONSUMER_REGISTER = 4
 	COMMIT_OFFSET     = 5
+	ASSIGNMENT        = 6
+	FETCH             = 7
 	// other message types can be added here
 
 	// ACK
@@ -23,6 +25,8 @@ const (
 	RESPONSE_PRODUCER_REGISTER = 102
 	R_PCM                      = 103
 	RESPONSE_CONSUMER_REGISTER = 104
+	ASSIGNMENT_ACK             = 105
+	FETCH_ACK                  = 106
 )
 
 type Message struct {
@@ -31,6 +35,8 @@ type Message struct {
 	PCM               []byte
 	CONSUMER_REGISTER *ConsumerRegister
 	COMMIT_OFFSET     *CommitOffset
+	ASSIGNMENT        *Assignment
+	FETCH             *Fetch
 	// other message types can be added here
 
 	// ACK
@@ -38,6 +44,22 @@ type Message struct {
 	RESPONSE_PRODUCER_REGISTER *byte
 	R_PCM                      *byte
 	RESPONSE_CONSUMER_REGISTER *byte
+	ASSIGNMENT_ACK             *byte
+	FETCH_ACK                  *FetchAck
+}
+type FetchAck struct {
+	partitionID uint16
+	found       bool
+	offset      uint32
+	data        []byte
+}
+
+type Fetch struct {
+	partitionID uint16
+}
+
+type Assignment struct {
+	Partitions []uint16
 }
 type CommitOffset struct {
 	TopicID uint16
@@ -48,6 +70,59 @@ type CommitOffset struct {
 type ProducerRegister struct {
 	port    uint16
 	topicID uint16
+}
+
+func (fa *FetchAck) toByte() []byte {
+	data := make([]byte, 7)
+	data[0] = byte(fa.partitionID >> 8)
+	data[1] = byte(fa.partitionID & 0xFF)
+	if fa.found {
+		data[2] = 1
+	} else {
+		data[2] = 0
+	}
+	data[3] = byte(fa.offset >> 24)
+	data[4] = byte((fa.offset >> 16) & 0xFF)
+	data[5] = byte((fa.offset >> 8) & 0xFF)
+	data[6] = byte(fa.offset & 0xFF)
+	data = append(data, fa.data...)
+	return data
+}
+
+func (fa *FetchAck) fromByte(data []byte) {
+	fa.partitionID = uint16(data[0])<<8 + uint16(data[1])
+	fa.found = data[2] == 1
+	fa.offset = uint32(data[3])<<24 + uint32(data[4])<<16 + uint32(data[5])<<8 + uint32(data[6])
+	fa.data = data[7:]
+}
+func (fe *Fetch) toByte() []byte {
+	var data [2]byte
+	data[0] = byte(fe.partitionID >> 8)
+	data[1] = byte(fe.partitionID & 0xFF)
+	return data[0:2]
+}
+
+func (fe *Fetch) fromByte(data []byte) {
+	fe.partitionID = uint16(data[0])<<8 + uint16(data[1])
+}
+
+func (a *Assignment) toByte() []byte {
+	res := make([]byte, 1+len(a.Partitions)*2)
+	res[0] = byte(len(a.Partitions))
+	for i, partitionID := range a.Partitions {
+		pos := 1 + i*2
+		res[pos] = byte(partitionID >> 8)
+		res[pos+1] = byte(partitionID & 0xFF)
+	}
+	return res
+}
+
+func (a *Assignment) fromByte(data []byte) {
+	res := make([]uint16, data[0])
+	for i := 0; i < int(data[0]); i++ {
+		res[i] = uint16(data[1+i*2])<<8 + uint16(data[i+i*2+1])
+	}
+	a.Partitions = res
 }
 
 func (pr *ProducerRegister) toByte() []byte { // toByte dùng để chuyển struct thành mảng byte để gửi đi qua stream
@@ -149,9 +224,24 @@ func parseMessage(stream_message []byte) *Message {
 		return &Message{
 			CONSUMER_REGISTER: cr,
 		}
+	case ASSIGNMENT_ACK:
+		var st = stream_message[1]
+		return &Message{ASSIGNMENT_ACK: &st}
 	case RESPONSE_CONSUMER_REGISTER:
 		var st = stream_message[1]
 		return &Message{RESPONSE_CONSUMER_REGISTER: &st}
+	case ASSIGNMENT:
+		var ass = &Assignment{}
+		ass.fromByte(stream_message[1:])
+		return &Message{ASSIGNMENT: ass}
+	case FETCH:
+		var fe = &Fetch{}
+		fe.fromByte(stream_message[1:])
+		return &Message{FETCH: fe}
+	case FETCH_ACK:
+		var fa = &FetchAck{}
+		fa.fromByte(stream_message[1:])
+		return &Message{FETCH_ACK: fa}
 	default:
 		return nil
 	}
@@ -189,20 +279,12 @@ func writeDataToStreamWithType(stream_wt *bufio.ReadWriter, messageType byte, da
 	return nil
 }
 
-func WriteMessageProducerRegisterToStream(stream_wt *bufio.ReadWriter, messageType byte, data *ProducerRegister) error {
-	prData := data.toByte()
-	if err := writeDataToStreamWithType(stream_wt, PRODUCER_REGISTER, string(prData)); err != nil {
-		return err
-	}
-	return nil
+type byteSerializable interface {
+	toByte() []byte
 }
 
-func WriteMessageConsumerRegisterToStream(stream_wt *bufio.ReadWriter, messageType byte, data *ConsumerRegister) error {
-	crData := data.toByte()
-	if err := writeDataToStreamWithType(stream_wt, CONSUMER_REGISTER, string(crData)); err != nil {
-		return err
-	}
-	return nil
+func WriteSerializableToStream(stream_wt *bufio.ReadWriter, messageType byte, data byteSerializable) error {
+	return writeDataToStreamWithType(stream_wt, messageType, string(data.toByte()))
 }
 
 func WriteMessageCommitOffsetToStream(stream_wt *bufio.ReadWriter, messageType byte, data *CommitOffset) error {
@@ -253,6 +335,27 @@ func WriteMessageToStream(stream_wt *bufio.ReadWriter, message *Message) error {
 	if message.RESPONSE_CONSUMER_REGISTER != nil {
 		data := fmt.Sprintf("%d", *message.RESPONSE_CONSUMER_REGISTER)
 		if err := writeDataToStreamWithType(stream_wt, RESPONSE_CONSUMER_REGISTER, data); err != nil {
+			return err
+		}
+	}
+	if message.ASSIGNMENT != nil {
+		if err := WriteSerializableToStream(stream_wt, ASSIGNMENT, message.ASSIGNMENT); err != nil {
+			return err
+		}
+	}
+	if message.ASSIGNMENT_ACK != nil {
+		data := fmt.Sprintf("%d", *message.ASSIGNMENT_ACK)
+		if err := writeDataToStreamWithType(stream_wt, ASSIGNMENT_ACK, data); err != nil {
+			return err
+		}
+	}
+	if message.FETCH != nil {
+		if err := WriteSerializableToStream(stream_wt, FETCH, message.FETCH); err != nil {
+			return err
+		}
+	}
+	if message.FETCH_ACK != nil {
+		if err := WriteSerializableToStream(stream_wt, FETCH_ACK, message.FETCH_ACK); err != nil {
 			return err
 		}
 	}
