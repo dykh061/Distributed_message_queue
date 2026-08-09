@@ -29,12 +29,15 @@ func (t *Topic) selectNextPartition() *Partition {
 func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
 	cgroup := &t.cgroups[cgroupIDX]
 	for i := range cgroup.consumers {
-		cgroup.consumers[i].partitions = nil
+		cgroup.consumers[i].partitionsOffset = nil
 	}
 	for i := range t.partitions {
 		partitionID := t.partitions[i].partitionID
 		consumerIDX := i % len(cgroup.consumers)
-		cgroup.consumers[consumerIDX].partitions = append(cgroup.consumers[consumerIDX].partitions, partitionID)
+		cgroup.consumers[consumerIDX].partitionsOffset = append(cgroup.consumers[consumerIDX].partitionsOffset, partitionOffset{
+			partitionID: partitionID,
+			offset:      cgroup.getOffset(partitionID), // bug nếu mà cgroup chưa có consumer thì sẽ bị panic cần fig
+		})
 	}
 	return nil
 }

@@ -15,7 +15,7 @@ const (
 	PRODUCER_REGISTER = 2
 	PCM               = 3 // Producer Consumer Message
 	CONSUMER_REGISTER = 4
-	COMMIT_OFFSET     = 5
+	COMMIT_OFFSET     = 5 //
 	ASSIGNMENT        = 6
 	FETCH             = 7
 	// other message types can be added here
@@ -50,16 +50,17 @@ type Message struct {
 type FetchAck struct {
 	partitionID uint16
 	found       bool
-	offset      uint32
+	nextOffset  uint32
 	data        []byte
 }
 
 type Fetch struct {
 	partitionID uint16
+	offset      uint32
 }
 
 type Assignment struct {
-	Partitions []uint16
+	assignment []partitionOffset
 }
 type CommitOffset struct {
 	TopicID uint16
@@ -81,10 +82,10 @@ func (fa *FetchAck) toByte() []byte {
 	} else {
 		data[2] = 0
 	}
-	data[3] = byte(fa.offset >> 24)
-	data[4] = byte((fa.offset >> 16) & 0xFF)
-	data[5] = byte((fa.offset >> 8) & 0xFF)
-	data[6] = byte(fa.offset & 0xFF)
+	data[3] = byte(fa.nextOffset >> 24)
+	data[4] = byte((fa.nextOffset >> 16) & 0xFF)
+	data[5] = byte((fa.nextOffset >> 8) & 0xFF)
+	data[6] = byte(fa.nextOffset & 0xFF)
 	data = append(data, fa.data...)
 	return data
 }
@@ -92,37 +93,49 @@ func (fa *FetchAck) toByte() []byte {
 func (fa *FetchAck) fromByte(data []byte) {
 	fa.partitionID = uint16(data[0])<<8 + uint16(data[1])
 	fa.found = data[2] == 1
-	fa.offset = uint32(data[3])<<24 + uint32(data[4])<<16 + uint32(data[5])<<8 + uint32(data[6])
+	fa.nextOffset = uint32(data[3])<<24 + uint32(data[4])<<16 + uint32(data[5])<<8 + uint32(data[6])
 	fa.data = data[7:]
 }
 func (fe *Fetch) toByte() []byte {
-	var data [2]byte
+	var data [6]byte
 	data[0] = byte(fe.partitionID >> 8)
 	data[1] = byte(fe.partitionID & 0xFF)
-	return data[0:2]
+	data[2] = byte(fe.offset >> 24)
+	data[3] = byte((fe.offset >> 16) & 0xFF)
+	data[4] = byte((fe.offset >> 8) & 0xFF)
+	data[5] = byte(fe.offset & 0xFF)
+	return data[0:6]
 }
 
 func (fe *Fetch) fromByte(data []byte) {
 	fe.partitionID = uint16(data[0])<<8 + uint16(data[1])
+	fe.offset = uint32(data[2])<<24 + uint32(data[3])<<16 + uint32(data[4])<<8 + uint32(data[5])
 }
 
 func (a *Assignment) toByte() []byte {
-	res := make([]byte, 1+len(a.Partitions)*2)
-	res[0] = byte(len(a.Partitions))
-	for i, partitionID := range a.Partitions {
-		pos := 1 + i*2
-		res[pos] = byte(partitionID >> 8)
-		res[pos+1] = byte(partitionID & 0xFF)
+	res := make([]byte, 1+len(a.assignment)*6)
+	res[0] = byte(len(a.assignment))
+	for i, assignment := range a.assignment {
+		pos := 1 + i*6
+		res[pos] = byte(assignment.partitionID >> 8)
+		res[pos+1] = byte(assignment.partitionID & 0xFF)
+		res[pos+2] = byte(assignment.offset >> 24)
+		res[pos+3] = byte((assignment.offset >> 16) & 0xFF)
+		res[pos+4] = byte((assignment.offset >> 8) & 0xFF)
+		res[pos+5] = byte(assignment.offset & 0xFF)
 	}
 	return res
 }
 
 func (a *Assignment) fromByte(data []byte) {
-	res := make([]uint16, data[0])
+	// chuyển mảng byte thành struct assignment { partitionID , offset }
+	res := make([]partitionOffset, data[0])
 	for i := 0; i < int(data[0]); i++ {
-		res[i] = uint16(data[1+i*2])<<8 + uint16(data[i+i*2+1])
+		pos := 1 + i*6
+		res[i].partitionID = uint16(data[pos])<<8 + uint16(data[pos+1])
+		res[i].offset = uint32(data[pos+2])<<24 + uint32(data[pos+3])<<16 + uint32(data[pos+4])<<8 + uint32(data[pos+5])
 	}
-	a.Partitions = res
+	a.assignment = res
 }
 
 func (pr *ProducerRegister) toByte() []byte { // toByte dùng để chuyển struct thành mảng byte để gửi đi qua stream

@@ -147,13 +147,22 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 			panic(err)
 		}
 		defer conn.Close()
+		stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 		broker.topics[topic_idx].cgroups[cgroup_idx].consumers = append(
 			broker.topics[topic_idx].cgroups[cgroup_idx].consumers,
-			Consumers{conn: conn},
+			Consumers{
+				conn:       conn,
+				stream_rw:  stream_rw,
+				ConsumerID: uint16(len(broker.topics[topic_idx].cgroups[cgroup_idx].consumers)),
+			},
 		)
+
 		broker.topics[topic_idx].rebalanceConsumerGroup(cgroup_idx)
 		broker.sendAssignmentToConsumerGroup(topic_idx, cgroup_idx)
-		go broker.handleConsumerConnection(topic_idx, cgroup_idx, conn)
+		err = broker.handleConsumerConnection(stream_rw, topic_idx, cgroup_idx)
+		if err != nil {
+			panic(err)
+		}
 	}()
 	var resp byte = 0
 	return &resp, nil
@@ -163,9 +172,8 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 
 }
 
-func (broker *Broker) handleConsumerConnection(topic_idx, cgroup_idx int, conn net.Conn) error {
+func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, topic_idx, cgroup_idx int) error {
 	for {
-		stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 		resp, err := ReadMessageFromStream(stream_rw)
 		if err != nil {
 			panic(err)
@@ -174,9 +182,66 @@ func (broker *Broker) handleConsumerConnection(topic_idx, cgroup_idx int, conn n
 			if resp.ASSIGNMENT_ACK != nil {
 				fmt.Printf("Consumer acknowledged assignment")
 			}
+			if resp.FETCH != nil {
+				partitionID := resp.FETCH.partitionID
+				var partition *Partition = nil
+				for i := range broker.topics[topic_idx].partitions {
+					if broker.topics[topic_idx].partitions[i].partitionID == partitionID {
+						partition = &broker.topics[topic_idx].partitions[i]
+						break
+					}
+				}
+				if partition != nil {
+					messages, nextOffset, found := broker.fetchMessagesFromPartition(&partition.mq, uint16(100), resp.FETCH.offset)
+					if !found {
+						fmt.Printf("Error fetching messages from partition %d: %v\n", partitionID, err)
+					}
+					fetch_ack := &Message{
+						FETCH_ACK: &FetchAck{
+							partitionID: partition.partitionID,
+							found:       found,
+							nextOffset:  nextOffset,
+							data:        messages,
+						},
+					}
+					err = WriteMessageToStream(stream_rw, fetch_ack)
+					if err != nil {
+						fmt.Printf("Error writing fetch ack to stream: %v\n", err)
+					}
+				}
+			}
 		}
 	}
-	return nil
+}
+
+func (broker *Broker) fetchMessagesFromPartition(partition *Queue, maxMessages uint16, offset uint32) (data []byte, nextOffset uint32, found bool) {
+
+	if partition.count == 0 {
+		return nil, offset, false
+	}
+	// Ví dụ base = 100, count = 3 → log chứa 100, 101, 102.
+	// maxLogicOffset = 103.
+	maxLogicOffset := partition.baseOffset + uint64(partition.count)
+	// offset nhỏ hơn baseOffset: record đã bị retention xoá.
+	// offset >= maxLogicOffset: chưa có record mới.
+	if offset < uint32(partition.baseOffset) || offset >= uint32(maxLogicOffset) {
+		return nil, offset, false
+	}
+	remaining := maxLogicOffset - uint64(offset)
+
+	readCount := uint64(maxMessages)
+	if readCount > remaining {
+		readCount = remaining
+	}
+	nextOffset = offset
+	var messages []byte
+	for i := uint64(0); i < readCount; i++ {
+		relativeOffset := nextOffset - uint32(partition.baseOffset)
+		msg := partition.peek(uint(relativeOffset))
+		messages = append(messages, msg...)
+		nextOffset++
+	}
+	return messages, nextOffset, true
 }
 
 func (broker *Broker) sendAssignmentToConsumerGroup(topic_idx, cgroup_idx int) error {
@@ -185,10 +250,10 @@ func (broker *Broker) sendAssignmentToConsumerGroup(topic_idx, cgroup_idx int) e
 	group := &broker.topics[topic_idx].cgroups[cgroup_idx]
 
 	for _, consumer := range group.consumers {
-		stream_rw := bufio.NewReadWriter(bufio.NewReader(consumer.conn), bufio.NewWriter(consumer.conn))
+		stream_rw := consumer.stream_rw
 		ass := &Message{
 			ASSIGNMENT: &Assignment{
-				Partitions: consumer.partitions,
+				assignment: consumer.partitionsOffset,
 			},
 		}
 		err = WriteMessageToStream(stream_rw, ass)

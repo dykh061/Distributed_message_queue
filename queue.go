@@ -13,15 +13,17 @@ var ArrMQ [ASLOT * SLOT_SIZE]byte  // mảng lưu trữ message queue, tổng c�
 var SizeMQ [ASLOT * SLOT_SIZE]byte // mảng lưu trữ kích thước của message queue cho mỗi slot
 
 type Queue struct {
-	head  uint32
-	tail  uint32
-	count uint32
+	head       uint32
+	tail       uint32
+	count      uint32
+	baseOffset uint64
 }
 
 func (q *Queue) init() {
 	q.head = 0
 	q.tail = 0
 	q.count = 0
+	q.baseOffset = 0
 }
 
 func (q *Queue) push(data []byte) {
@@ -33,10 +35,14 @@ func (q *Queue) push(data []byte) {
 }
 
 func (q *Queue) pop() []byte {
+	if q.count == 0 {
+		return nil
+	}
 	data := ArrMQ[q.head : q.head+uint32(SizeMQ[q.head])]
 	q.count--
 	q.head += 255
 	q.head %= ASLOT * SLOT_SIZE
+	q.baseOffset += 1
 	return data
 }
 

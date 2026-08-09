@@ -11,8 +11,8 @@ type Consumer struct {
 	port       uint16
 	topicID    uint16
 	groupID    uint16
-	assignment []uint16
-	generation uint16
+	assignment []partitionOffset // danh sách các partition mà consumer này được assign
+	generation uint16            // phiên bản của assignment hiện tại
 }
 
 // Kết nối tới Broker.
@@ -86,30 +86,50 @@ func (consumer *Consumer) StartConsumerServer() error {
 		resp, err := ReadMessageFromStream(stream_rw)
 		if err != nil {
 			log.Println(err)
+			return err
+		}
+		if resp == nil {
 			continue
 		}
 		if resp != nil {
 			if resp.ASSIGNMENT != nil {
-				consumer.assignment = resp.ASSIGNMENT.Partitions
+				consumer.assignment = resp.ASSIGNMENT.assignment
 				consumer.generation += 1
 				var ack = byte(1)
 				fmt.Printf("Consumer updated assignment to version %d:", consumer.generation)
 				err := WriteMessageToStream(stream_rw, &Message{ASSIGNMENT_ACK: &ack})
 				if err != nil {
-					log.Println(err)
-					continue
+					return err
 				}
-				for _, partitionID := range consumer.assignment {
-					go func(partitionID uint16) {
-						if consumer
-					}(partitionID)
+				for _, p := range consumer.assignment {
+					err := consumer.fetchMessages(stream_rw, p.partitionID, p.offset)
+					if err != nil {
+						return err
+					}
 				}
 			}
+			if resp.FETCH_ACK != nil {
+				//xỮ LÍ BATH commit và fetch tiếp theo
+			}
 		}
+		// cái chỗ này để write gửi cho broker yêu cầu fetch à
 	}
 	return nil
 }
 
-func (consumer *Consumer) fetchMessages() {
+func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
+	Message := &Message{
+		FETCH: &Fetch{
+			partitionID: partitionID,
+			offset:      offset,
+		},
+	}
+	return WriteMessageToStream(steam_rw, Message)
+}
 
+func (consumer *Consumer) requestFetch(stream_rw *bufio.ReadWriter, resp *FetchAck) error {
+	if !resp.found {
+		return nil
+	}
+	// chưa xử lý commit offset về cho broker
 }
