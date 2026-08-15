@@ -5,14 +5,14 @@ import (
 	"net"
 )
 
-type CGroup struct {
-	cgroupId  uint16
+type ConsumerGroup struct {
+	cgroupID  uint16
 	consumers []Consumers       // lưu danh sách các consumer trong consumer group này
 	offset    []partitionOffset // Lưu các offset của từng partition đã được commit
 }
 
-func (cg *CGroup) init(id uint16) {
-	cg.cgroupId = id
+func (cg *ConsumerGroup) init(id uint16) {
+	cg.cgroupID = id
 	cg.consumers = make([]Consumers, 0)
 	cg.offset = make([]partitionOffset, 0)
 }
@@ -24,12 +24,12 @@ type Consumers struct {
 	partitionsOffset []partitionOffset // lưu danh sách các ID của các partition mà consumer này đang subscribe
 }
 
-type partitionOffset struct {
+type PartitionOffset struct {
 	partitionID uint16
 	offset      uint32
 }
 
-func (cg *CGroup) getOffset(partitionID uint16) uint32 {
+func (cg *ConsumerGroup) getOffset(partitionID uint16) uint32 {
 	if len(cg.offset) == 0 {
 		return uint32(0)
 	}
@@ -41,7 +41,7 @@ func (cg *CGroup) getOffset(partitionID uint16) uint32 {
 	return uint32(0)
 }
 
-func (cg *CGroup) commitOffset(partitionID uint16, offset uint32) {
+func (cg *ConsumerGroup) commitOffset(partitionID uint16, offset uint32) {
 	for i, po := range cg.offset {
 		if po.partitionID == partitionID {
 			cg.offset[i].offset = offset

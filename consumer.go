@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -11,7 +12,7 @@ type Consumer struct {
 	port       uint16
 	topicID    uint16
 	groupID    uint16
-	assignment []partitionOffset // danh sách các partition mà consumer này được assign
+	assignment []PartitionOffset // danh sách các partition mà consumer này được assign
 	generation uint16            // phiên bản của assignment hiện tại
 }
 
@@ -109,10 +110,23 @@ func (consumer *Consumer) StartConsumerServer() error {
 				}
 			}
 			if resp.FETCH_ACK != nil {
-				//xỮ LÍ BATH commit và fetch tiếp theo
+				err := consumer.handleFetchAck(stream_rw, resp.FETCH_ACK)
+				if err != nil {
+					return err
+				}
+				msg, err := ReadMessageFromStream(stream_rw)
+				if err != nil {
+					return err
+				}
+				if msg.COMMIT_OFFSET_ACK != nil {
+					fmt.Printf("Consumer received commit offset ack: %v\n", *msg.COMMIT_OFFSET_ACK)
+
+				} else {
+
+				}
 			}
 		}
-		// cái chỗ này để write gửi cho broker yêu cầu fetch à
+
 	}
 	return nil
 }
@@ -127,9 +141,47 @@ func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID 
 	return WriteMessageToStream(steam_rw, Message)
 }
 
-func (consumer *Consumer) requestFetch(stream_rw *bufio.ReadWriter, resp *FetchAck) error {
+func (consumer *Consumer) handleFetchAck(stream_rw *bufio.ReadWriter, resp *FetchAck) error {
 	if !resp.found {
-		return nil
+		return errors.New("don't have messages")
 	}
-	// chưa xử lý commit offset về cho broker
+	commitOffset := consumer.readMsgFromPartitionLog(resp.data, resp.nextOffset, resp.partitionID)
+	return consumer.commitOffset(stream_rw, resp.partitionID, commitOffset)
+}
+
+func (consumer *Consumer) 	readMsgFromPartitionLog(msg []byte, nextOffset uint32, partitionID uint16) uint32 {
+	var currentOffset uint32
+	var partitionIDX int = -1
+	var commitOffset uint32
+	for i, p := range consumer.assignment {
+		if p.partitionID == partitionID {
+			currentOffset = p.offset
+			partitionIDX = i
+			break
+		}
+	}
+	pos := 0
+	msgCount := nextOffset - currentOffset
+	for i := uint32(0); i < msgCount; i++ {
+		lenght := uint16(msg[pos])<<8 + uint16(msg[pos+1])
+		pos += 2                              // bỏ qua 2 byte độ dài của message
+		message := msg[pos : pos+int(lenght)] // lấy nội dùng message ra
+		fmt.Printf("Consumer received message from partition %d, offset %d: %s\n", partitionID, currentOffset+i, string(message))
+		commitOffset = currentOffset + i + 1 // cập nhật offset mới nhất đã đọc được + 1
+		consumer.assignment[partitionIDX].offset = commitOffset
+		pos += int(lenght)
+	}
+	return commitOffset
+}
+
+func (consumer *Consumer) commitOffset(stream_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
+	Message := &Message{
+		COMMIT_OFFSET: &CommitOffset{
+			TopicID:     consumer.topicID,
+			GroupID:     consumer.groupID,
+			PartitionID: partitionID,
+			Offset:      offset,
+		},
+	}
+	return WriteMessageCommitOffsetToStream(stream_rw, COMMIT_OFFSET, Message.COMMIT_OFFSET)
 }

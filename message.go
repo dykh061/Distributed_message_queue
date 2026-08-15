@@ -27,6 +27,7 @@ const (
 	RESPONSE_CONSUMER_REGISTER = 104
 	ASSIGNMENT_ACK             = 105
 	FETCH_ACK                  = 106
+	COMMIT_OFFSET_ACK          = 107
 )
 
 type Message struct {
@@ -46,6 +47,7 @@ type Message struct {
 	RESPONSE_CONSUMER_REGISTER *byte
 	ASSIGNMENT_ACK             *byte
 	FETCH_ACK                  *FetchAck
+	COMMIT_OFFSET_ACK          *byte
 }
 type FetchAck struct {
 	partitionID uint16
@@ -60,12 +62,13 @@ type Fetch struct {
 }
 
 type Assignment struct {
-	assignment []partitionOffset
+	assignment []PartitionOffset
 }
 type CommitOffset struct {
-	TopicID uint16
-	GroupID uint16
-	Offset  uint32
+	TopicID     uint16
+	GroupID     uint16
+	Offset      uint32
+	PartitionID uint16
 }
 
 type ProducerRegister struct {
@@ -129,7 +132,7 @@ func (a *Assignment) toByte() []byte {
 
 func (a *Assignment) fromByte(data []byte) {
 	// chuyển mảng byte thành struct assignment { partitionID , offset }
-	res := make([]partitionOffset, data[0])
+	res := make([]PartitionOffset, data[0])
 	for i := 0; i < int(data[0]); i++ {
 		pos := 1 + i*6
 		res[i].partitionID = uint16(data[pos])<<8 + uint16(data[pos+1])
@@ -212,6 +215,7 @@ func parseMessage(stream_message []byte) *Message {
 		co.TopicID = uint16(stream_message[1])<<8 + uint16(stream_message[2])
 		co.GroupID = uint16(stream_message[3])<<8 + uint16(stream_message[4])
 		co.Offset = uint32(stream_message[5])<<24 + uint32(stream_message[6])<<16 + uint32(stream_message[7])<<8 + uint32(stream_message[8])
+		co.PartitionID = uint16(stream_message[9])<<8 + uint16(stream_message[10])
 		return &Message{COMMIT_OFFSET: co}
 	case RESPONSE_ECHO:
 		var st = string(stream_message[1:])
@@ -231,6 +235,9 @@ func parseMessage(stream_message []byte) *Message {
 	case R_PCM:
 		var st = stream_message[1]
 		return &Message{R_PCM: &st}
+	case COMMIT_OFFSET_ACK:
+		var st = stream_message[1]
+		return &Message{COMMIT_OFFSET_ACK: &st}
 	case CONSUMER_REGISTER:
 		var cr = &ConsumerRegister{}
 		cr.fromByte(stream_message[1:])
@@ -301,7 +308,7 @@ func WriteSerializableToStream(stream_wt *bufio.ReadWriter, messageType byte, da
 }
 
 func WriteMessageCommitOffsetToStream(stream_wt *bufio.ReadWriter, messageType byte, data *CommitOffset) error {
-	var coData [8]byte
+	var coData [10]byte
 	coData[0] = byte(data.TopicID >> 8)
 	coData[1] = byte(data.TopicID & 0xFF)
 	coData[2] = byte(data.GroupID >> 8)
@@ -310,6 +317,8 @@ func WriteMessageCommitOffsetToStream(stream_wt *bufio.ReadWriter, messageType b
 	coData[5] = byte((data.Offset >> 16) & 0xFF)
 	coData[6] = byte((data.Offset >> 8) & 0xFF)
 	coData[7] = byte(data.Offset & 0xFF)
+	coData[8] = byte(data.PartitionID >> 8)
+	coData[9] = byte(data.PartitionID & 0xFF)
 	if err := writeDataToStreamWithType(stream_wt, COMMIT_OFFSET, string(coData[:])); err != nil {
 		return err
 	}
@@ -342,6 +351,12 @@ func WriteMessageToStream(stream_wt *bufio.ReadWriter, message *Message) error {
 	if message.R_PCM != nil {
 		data := fmt.Sprintf("%d", *message.R_PCM)
 		if err := writeDataToStreamWithType(stream_wt, R_PCM, data); err != nil {
+			return err
+		}
+	}
+	if message.COMMIT_OFFSET_ACK != nil {
+		data := fmt.Sprintf("%d", *message.COMMIT_OFFSET_ACK)
+		if err := writeDataToStreamWithType(stream_wt, COMMIT_OFFSET_ACK, data); err != nil {
 			return err
 		}
 	}

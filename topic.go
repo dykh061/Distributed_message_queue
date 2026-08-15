@@ -1,28 +1,28 @@
 package main
 
 type Topic struct {
-	TopicID       uint16
+	topicID       uint16
 	partitions    []Partition
-	cgroups       []CGroup
-	nextpartition uint32
+	cgroups       []ConsumerGroup
+	nextPartition uint32
 }
 
 func (t *Topic) init(id uint16) {
-	t.TopicID = id
+	t.topicID = id
 	t.partitions = make([]Partition, 3)
 	for i := range t.partitions {
 		t.partitions[i].init(uint16(i))
 	}
-	t.cgroups = make([]CGroup, 0)
-	t.nextpartition = 0
+	t.cgroups = make([]ConsumerGroup, 0)
+	t.nextPartition = 0
 }
 
 func (t *Topic) selectNextPartition() *Partition {
 	if len(t.partitions) == 0 {
 		return nil
 	}
-	idx := t.nextpartition
-	t.nextpartition = (t.nextpartition + 1) % uint32(len(t.partitions))
+	idx := t.nextPartition
+	t.nextPartition = (t.nextPartition + 1) % uint32(len(t.partitions))
 	return &t.partitions[idx]
 }
 
@@ -34,7 +34,7 @@ func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
 	for i := range t.partitions {
 		partitionID := t.partitions[i].partitionID
 		consumerIDX := i % len(cgroup.consumers)
-		cgroup.consumers[consumerIDX].partitionsOffset = append(cgroup.consumers[consumerIDX].partitionsOffset, partitionOffset{
+		cgroup.consumers[consumerIDX].partitionsOffset = append(cgroup.consumers[consumerIDX].partitionsOffset, PartitionOffset{
 			partitionID: partitionID,
 			offset:      cgroup.getOffset(partitionID), // bug nếu mà cgroup chưa có consumer thì sẽ bị panic cần fig
 		})

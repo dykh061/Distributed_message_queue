@@ -109,7 +109,7 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 		topic_idx = len(broker.topics) - 1
 	} else {
 		for index, tp := range broker.topics {
-			if tp.TopicID == consumer_register_message.topicID {
+			if tp.topicID == consumer_register_message.topicID {
 				topic_idx = index
 				break
 			}
@@ -123,19 +123,19 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 	}
 	var cgroup_idx int = -1
 	if len(broker.topics[topic_idx].cgroups) == 0 {
-		ncgroup := &CGroup{}
+		ncgroup := &ConsumerGroup{}
 		ncgroup.init(consumer_register_message.groupID)
 		broker.topics[topic_idx].cgroups = append(broker.topics[topic_idx].cgroups, *ncgroup)
 		cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
 	} else {
 		for index, cg := range broker.topics[topic_idx].cgroups {
-			if cg.cgroupId == consumer_register_message.groupID {
+			if cg.cgroupID == consumer_register_message.groupID {
 				cgroup_idx = index
 				break
 			}
 		}
 		if cgroup_idx == -1 {
-			ncgroup := &CGroup{}
+			ncgroup := &ConsumerGroup{}
 			ncgroup.init(consumer_register_message.groupID)
 			broker.topics[topic_idx].cgroups = append(broker.topics[topic_idx].cgroups, *ncgroup)
 			cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
@@ -182,6 +182,37 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, topi
 			if resp.ASSIGNMENT_ACK != nil {
 				fmt.Printf("Consumer acknowledged assignment")
 			}
+			if resp.COMMIT_OFFSET != nil {
+				CommitOffset := resp.COMMIT_OFFSET
+				partitionID := CommitOffset.PartitionID
+				if CommitOffset.GroupID != broker.topics[topic_idx].cgroups[cgroup_idx].cgroupID ||
+					CommitOffset.TopicID != broker.topics[topic_idx].topicID {
+					return errors.New("Commit offset message has mismatched group or topic ID")
+				}
+				sliceOffset := broker.topics[topic_idx].cgroups[cgroup_idx].offset
+				flag := false
+				for _, po := range sliceOffset {
+					if po.partitionID == partitionID {
+						po.offset = CommitOffset.Offset
+						flag = true
+						break
+					}
+				}
+				if !flag {
+					sliceOffset = append(sliceOffset, PartitionOffset{
+						partitionID: partitionID,
+						offset:      CommitOffset.Offset,
+					})
+				}
+				var ack byte = 1
+				Message := &Message{
+					COMMIT_OFFSET_ACK: &ack,
+				}
+				err := WriteMessageToStream(stream_rw, Message)
+				if err != nil {
+					return err
+				}
+			}
 			if resp.FETCH != nil {
 				partitionID := resp.FETCH.partitionID
 				var partition *Partition = nil
@@ -219,14 +250,17 @@ func (broker *Broker) fetchMessagesFromPartition(partition *Queue, maxMessages u
 	if partition.count == 0 {
 		return nil, offset, false
 	}
+
 	// Ví dụ base = 100, count = 3 → log chứa 100, 101, 102.
 	// maxLogicOffset = 103.
 	maxLogicOffset := partition.baseOffset + uint64(partition.count)
+
 	// offset nhỏ hơn baseOffset: record đã bị retention xoá.
 	// offset >= maxLogicOffset: chưa có record mới.
-	if offset < uint32(partition.baseOffset) || offset >= uint32(maxLogicOffset) {
+	if uint64(offset) < partition.baseOffset || uint64(offset) >= maxLogicOffset {
 		return nil, offset, false
 	}
+
 	remaining := maxLogicOffset - uint64(offset)
 
 	readCount := uint64(maxMessages)
@@ -238,6 +272,10 @@ func (broker *Broker) fetchMessagesFromPartition(partition *Queue, maxMessages u
 	for i := uint64(0); i < readCount; i++ {
 		relativeOffset := nextOffset - uint32(partition.baseOffset)
 		msg := partition.peek(uint(relativeOffset))
+		lengthmsg := uint16(len(msg))
+		first := byte(lengthmsg >> 8)
+		last := byte(lengthmsg & 0xff)
+		messages = append(messages, first, last)
 		messages = append(messages, msg...)
 		nextOffset++
 	}
@@ -278,7 +316,7 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 		topic_idx = len(broker.topics) - 1
 	} else {
 		for index, tp := range broker.topics {
-			if tp.TopicID == producer_register_message.topicID {
+			if tp.topicID == producer_register_message.topicID {
 				topic_idx = index
 				break
 			}
