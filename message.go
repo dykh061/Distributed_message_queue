@@ -47,13 +47,18 @@ type Message struct {
 	RESPONSE_CONSUMER_REGISTER *byte
 	ASSIGNMENT_ACK             *byte
 	FETCH_ACK                  *FetchAck
-	COMMIT_OFFSET_ACK          *byte
+	COMMIT_OFFSET_ACK          *CommitOffsetAck
 }
 type FetchAck struct {
 	partitionID uint16
 	found       bool
 	nextOffset  uint32
 	data        []byte
+}
+type CommitOffsetAck struct {
+	partitionID uint16
+	offset      uint32
+	success     bool
 }
 
 type Fetch struct {
@@ -74,6 +79,28 @@ type CommitOffset struct {
 type ProducerRegister struct {
 	port    uint16
 	topicID uint16
+}
+
+func (coa *CommitOffsetAck) fromByte(data []byte) {
+	coa.partitionID = uint16(data[0])<<8 + uint16(data[1])
+	coa.offset = uint32(data[2])<<24 + uint32(data[3])<<16 + uint32(data[4])<<8 + uint32(data[5])
+	coa.success = data[6] == 1
+}
+
+func (coa *CommitOffsetAck) toByte() []byte {
+	data := make([]byte, 7)
+	data[0] = byte(coa.partitionID >> 8)
+	data[1] = byte(coa.partitionID & 0xFF)
+	data[2] = byte(coa.offset >> 24)
+	data[3] = byte((coa.offset >> 16) & 0xFF)
+	data[4] = byte((coa.offset >> 8) & 0xFF)
+	data[5] = byte(coa.offset & 0xFF)
+	if coa.success {
+		data[6] = byte(1)
+	} else {
+		data[6] = byte(0)
+	}
+	return data
 }
 
 func (fa *FetchAck) toByte() []byte {
@@ -235,9 +262,6 @@ func parseMessage(stream_message []byte) *Message {
 	case R_PCM:
 		var st = stream_message[1]
 		return &Message{R_PCM: &st}
-	case COMMIT_OFFSET_ACK:
-		var st = stream_message[1]
-		return &Message{COMMIT_OFFSET_ACK: &st}
 	case CONSUMER_REGISTER:
 		var cr = &ConsumerRegister{}
 		cr.fromByte(stream_message[1:])
@@ -262,6 +286,10 @@ func parseMessage(stream_message []byte) *Message {
 		var fa = &FetchAck{}
 		fa.fromByte(stream_message[1:])
 		return &Message{FETCH_ACK: fa}
+	case COMMIT_OFFSET_ACK:
+		var coa = &CommitOffsetAck{}
+		coa.fromByte(stream_message[1:])
+		return &Message{COMMIT_OFFSET_ACK: coa}
 	default:
 		return nil
 	}
@@ -351,12 +379,6 @@ func WriteMessageToStream(stream_wt *bufio.ReadWriter, message *Message) error {
 	if message.R_PCM != nil {
 		data := fmt.Sprintf("%d", *message.R_PCM)
 		if err := writeDataToStreamWithType(stream_wt, R_PCM, data); err != nil {
-			return err
-		}
-	}
-	if message.COMMIT_OFFSET_ACK != nil {
-		data := fmt.Sprintf("%d", *message.COMMIT_OFFSET_ACK)
-		if err := writeDataToStreamWithType(stream_wt, COMMIT_OFFSET_ACK, data); err != nil {
 			return err
 		}
 	}

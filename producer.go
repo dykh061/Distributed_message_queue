@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 )
 
 type Producer struct {
@@ -18,6 +19,7 @@ type Producer struct {
 // Chờ Broker phản hồi ACK đăng ký.
 // Sau khi hàm kết thúc thì kết nối này sẽ được đóng.
 func (producer *Producer) registerWithBroker() error {
+	fmt.Printf("[Producer %d] Listening on :%d\n", producer.port, producer.port)
 	conn, err := net.Dial("tcp", fmt.Sprintf(":%d", BROKER_PORT))
 	if err != nil {
 		return fmt.Errorf("cannot connect to broker on port %d: %w", BROKER_PORT, err)
@@ -43,9 +45,12 @@ func (producer *Producer) registerWithBroker() error {
 		return err
 	}
 	if resp.RESPONSE_PRODUCER_REGISTER == nil {
-		fmt.Println("Broker did not send register ack")
+		fmt.Println("[Broker] Producer registration failed")
 	} else {
-		fmt.Printf("Receive response from broker: %v\n", *resp.RESPONSE_PRODUCER_REGISTER)
+		fmt.Printf("[Broker] PRODUCER_REGISTER\n  Producer: %d\n  Port: %d\n  Topic: %d\n", producer.port, producer.port, producer.topicID)
+		fmt.Printf("[Broker] Connecting to Producer :%d\n", producer.port)
+		fmt.Printf("[Broker] Producer connected\n")
+		fmt.Printf("[Broker] Start Producer Handler\n")
 	}
 	return nil
 }
@@ -96,7 +101,8 @@ func (producer *Producer) StartProducerServer() error {
 		if err != nil {
 			break
 		}
-		fmt.Printf("Receive Message From Broker: %d\n", *resp.R_PCM)
+		fmt.Printf("[Producer %d] Sending message: %s\n", producer.port, strings.TrimSpace(line))
+		fmt.Printf("[Producer %d] ACK: %d\n", producer.port, *resp.R_PCM)
 	}
 	return err
 }

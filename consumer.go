@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 )
 
 type Consumer struct {
-	port       uint16
-	topicID    uint16
-	groupID    uint16
-	assignment []PartitionOffset // danh sách các partition mà consumer này được assign
-	generation uint16            // phiên bản của assignment hiện tại
+	port           uint16
+	topicID        uint16
+	groupID        uint16
+	assignment     []PartitionOffset // danh sách các partition mà consumer này được assign và offset mà consumer này đang đọc tới đâu
+	commitedOffset []PartitionOffset // Lưu các offset đã commit của từng partition
+	generation     uint16            // phiên bản của assignment hiện tại
+	pendingCommit  map[uint16]uint32 // lưu các offset đang chờ commit của từng partition
 }
 
 // Kết nối tới Broker.
@@ -47,9 +50,12 @@ func (consumer *Consumer) registerWithBroker() error {
 		return err
 	}
 	if resp.RESPONSE_CONSUMER_REGISTER == nil {
-		fmt.Println("Broker did not send register ack")
+		fmt.Println("[Broker] Consumer registration failed")
 	} else {
-		fmt.Printf("Receive response from broker: %v\n", *resp.RESPONSE_CONSUMER_REGISTER)
+		fmt.Printf("[Consumer %d] Listening on :%d\n", consumer.port, consumer.port)
+		fmt.Printf("[Broker] CONSUMER_REGISTER\n  Consumer: %d\n  Group: %d\n  Port: %d\n", consumer.port, consumer.groupID, consumer.port)
+		fmt.Printf("[Broker] Connecting to Consumer :%d\n", consumer.port)
+		fmt.Printf("[Broker] Consumer %d connected\n", consumer.port)
 	}
 	return nil
 }
@@ -97,7 +103,13 @@ func (consumer *Consumer) StartConsumerServer() error {
 				consumer.assignment = resp.ASSIGNMENT.assignment
 				consumer.generation += 1
 				var ack = byte(1)
-				fmt.Printf("Consumer updated assignment to version %d:", consumer.generation)
+				fmt.Printf("[Consumer %d] ASSIGNMENT received\n", consumer.port)
+				fmt.Printf("[Consumer %d] Subscribed: ", consumer.port)
+				for i, p := range consumer.assignment {
+					if i > 0 { fmt.Print(", ") }
+					fmt.Printf("P%d", p.partitionID)
+				}
+				fmt.Println()
 				err := WriteMessageToStream(stream_rw, &Message{ASSIGNMENT_ACK: &ack})
 				if err != nil {
 					return err
@@ -110,19 +122,31 @@ func (consumer *Consumer) StartConsumerServer() error {
 				}
 			}
 			if resp.FETCH_ACK != nil {
+				messageCount := 0
+				if resp.FETCH_ACK.found {
+					for _, p := range consumer.assignment {
+						if p.partitionID == resp.FETCH_ACK.partitionID {
+							messageCount = int(resp.FETCH_ACK.nextOffset - p.offset)
+							break
+						}
+					}
+				}
+				fmt.Printf("[Consumer %d] FETCH_ACK received\n  Partition: P%d\n  MessageCount: %d\n", consumer.port, resp.FETCH_ACK.partitionID, messageCount)
 				err := consumer.handleFetchAck(stream_rw, resp.FETCH_ACK)
 				if err != nil {
 					return err
 				}
-				msg, err := ReadMessageFromStream(stream_rw)
+			}
+			if resp.COMMIT_OFFSET_ACK != nil {
+				commitAck := resp.COMMIT_OFFSET_ACK
+				fmt.Printf("[Consumer %d] COMMIT_OFFSET_ACK received\n  Partition: P%d\n  CommittedOffset: %d\n", consumer.port, commitAck.partitionID, commitAck.offset)
+				err := consumer.updateCommitedOffset(commitAck.partitionID, commitAck.offset)
 				if err != nil {
 					return err
 				}
-				if msg.COMMIT_OFFSET_ACK != nil {
-					fmt.Printf("Consumer received commit offset ack: %v\n", *msg.COMMIT_OFFSET_ACK)
-
-				} else {
-
+				err = consumer.fetchMessages(stream_rw, commitAck.partitionID, commitAck.offset)
+				if err != nil {
+					return err
 				}
 			}
 		}
@@ -131,7 +155,27 @@ func (consumer *Consumer) StartConsumerServer() error {
 	return nil
 }
 
+func (consumer *Consumer) updateCommitedOffset(partitionID uint16, offset uint32) error {
+	value, ok := consumer.pendingCommit[partitionID]
+	if ok && value == offset {
+		delete(consumer.pendingCommit, partitionID)
+		for i, po := range consumer.commitedOffset {
+			if po.partitionID == partitionID {
+				consumer.commitedOffset[i].offset = offset
+				return nil
+			}
+		}
+		consumer.commitedOffset = append(consumer.commitedOffset, PartitionOffset{
+			partitionID: partitionID,
+			offset:      offset,
+		})
+		return nil
+	}
+	return errors.New("offset not found in pending commit")
+}
+
 func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
+	fmt.Printf("[Consumer %d] FETCH\n  Partition: P%d\n  Offset: %d\n  MaxMessages: 100\n", consumer.port, partitionID, offset)
 	Message := &Message{
 		FETCH: &Fetch{
 			partitionID: partitionID,
@@ -143,13 +187,20 @@ func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID 
 
 func (consumer *Consumer) handleFetchAck(stream_rw *bufio.ReadWriter, resp *FetchAck) error {
 	if !resp.found {
-		return errors.New("don't have messages")
+		fmt.Printf("[Consumer %d] No new messages\n", consumer.port)
+		fmt.Printf("[Consumer %d] Retry fetch in 1s\n", consumer.port)
+		time.Sleep(1 * time.Second)
+		return consumer.fetchMessages(stream_rw, resp.partitionID, resp.nextOffset)
 	}
+	startOffset := resp.nextOffset - uint32(len(resp.data)/2)
+	messageCount := resp.nextOffset - startOffset
+	fmt.Printf("[Consumer %d] Processing messages\n  Partition: P%d\n  StartOffset: %d\n  MessageCount: %d\n  NextOffset: %d\n", consumer.port, resp.partitionID, startOffset, messageCount, resp.nextOffset)
 	commitOffset := consumer.readMsgFromPartitionLog(resp.data, resp.nextOffset, resp.partitionID)
+	fmt.Printf("[Consumer %d] Process completed\n  NextOffset: %d\n", consumer.port, commitOffset)
 	return consumer.commitOffset(stream_rw, resp.partitionID, commitOffset)
 }
 
-func (consumer *Consumer) 	readMsgFromPartitionLog(msg []byte, nextOffset uint32, partitionID uint16) uint32 {
+func (consumer *Consumer) readMsgFromPartitionLog(msg []byte, nextOffset uint32, partitionID uint16) uint32 {
 	var currentOffset uint32
 	var partitionIDX int = -1
 	var commitOffset uint32
@@ -175,6 +226,8 @@ func (consumer *Consumer) 	readMsgFromPartitionLog(msg []byte, nextOffset uint32
 }
 
 func (consumer *Consumer) commitOffset(stream_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
+	consumer.pendingCommit[partitionID] = offset
+	fmt.Printf("[Consumer %d] COMMIT_OFFSET\n  Group: %d\n  Partition: P%d\n  Offset: %d\n", consumer.port, consumer.groupID, partitionID, offset)
 	Message := &Message{
 		COMMIT_OFFSET: &CommitOffset{
 			TopicID:     consumer.topicID,

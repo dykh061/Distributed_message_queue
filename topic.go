@@ -1,6 +1,9 @@
 package main
 
+import "sync"
+
 type Topic struct {
+	mu            sync.RWMutex
 	topicID       uint16
 	partitions    []Partition
 	cgroups       []ConsumerGroup
@@ -18,6 +21,8 @@ func (t *Topic) init(id uint16) {
 }
 
 func (t *Topic) selectNextPartition() *Partition {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if len(t.partitions) == 0 {
 		return nil
 	}
@@ -27,7 +32,15 @@ func (t *Topic) selectNextPartition() *Partition {
 }
 
 func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
+	if cgroupIDX < 0 || cgroupIDX >= len(t.cgroups) {
+		return nil
+	}
 	cgroup := &t.cgroups[cgroupIDX]
+	if len(cgroup.consumers) == 0 {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for i := range cgroup.consumers {
 		cgroup.consumers[i].partitionsOffset = nil
 	}
@@ -36,7 +49,7 @@ func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
 		consumerIDX := i % len(cgroup.consumers)
 		cgroup.consumers[consumerIDX].partitionsOffset = append(cgroup.consumers[consumerIDX].partitionsOffset, PartitionOffset{
 			partitionID: partitionID,
-			offset:      cgroup.getOffset(partitionID), // bug nếu mà cgroup chưa có consumer thì sẽ bị panic cần fig
+			offset:      cgroup.getOffset(partitionID),
 		})
 	}
 	return nil

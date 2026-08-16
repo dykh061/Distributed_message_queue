@@ -41,9 +41,10 @@ func main() {
 			panic(err)
 		}
 		consumer := &Consumer{
-			port:    uint16(port),
-			topicID: uint16(topicID),
-			groupID: uint16(groupID),
+			port:          uint16(port),
+			topicID:       uint16(topicID),
+			groupID:       uint16(groupID),
+			pendingCommit: make(map[uint16]uint32),
 		}
 		consumer.StartConsumerServer()
 	}
