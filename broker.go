@@ -13,22 +13,25 @@ import (
 const BROKER_PORT = 10000
 
 type Broker struct {
-	mu     sync.Mutex
-	topics []Topic
+	mu     sync.RWMutex
+	topics []*Topic
 }
 
 func (broker *Broker) init() {
-	broker.topics = make([]Topic, 0)
+	broker.topics = make([]*Topic, 0)
 }
 
 func (broker *Broker) printState(topicIdx int) {
+	broker.mu.RLock()
+	defer broker.mu.RUnlock()
 	if topicIdx < 0 || topicIdx >= len(broker.topics) {
 		return
 	}
 	fmt.Println("\n================ BROKER STATE ================")
 	topic := broker.topics[topicIdx]
 	fmt.Printf("TOPIC: %d\n\n", topic.topicID)
-	for _, partition := range topic.partitions {
+	for i := range topic.partitions {
+		partition := &topic.partitions[i]
 		fmt.Printf("P%d\n  Messages: %d\n\n", partition.partitionID, partition.mq.count)
 	}
 	if len(topic.cgroups) == 0 {
@@ -36,16 +39,19 @@ func (broker *Broker) printState(topicIdx int) {
 		return
 	}
 	fmt.Printf("CONSUMER GROUP: %d\n\n", topic.cgroups[0].cgroupID)
-	for _, cg := range topic.cgroups {
+	for i := range topic.cgroups {
+		cg := &topic.cgroups[i]
 		fmt.Printf("Consumer %d\n", cg.cgroupID)
-		for _, consumer := range cg.consumers {
+		for i := range cg.consumers {
+			consumer := &cg.consumers[i]
 			assignment := make([]string, 0, len(consumer.partitionsOffset))
 			for _, p := range consumer.partitionsOffset {
 				assignment = append(assignment, fmt.Sprintf("P%d", p.partitionID))
 			}
 			fmt.Printf("  Assignment: %s\n", strings.Join(assignment, ", "))
 		}
-		for _, po := range cg.offset {
+		for i := range cg.offset {
+			po := &cg.offset[i]
 			fmt.Printf("  P%d -> Next: %d | Commit: %d\n", po.partitionID, po.offset, po.offset)
 		}
 		fmt.Println()
@@ -145,11 +151,12 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 	fmt.Println("[Broker] New connection received")
 	fmt.Printf("[Broker] Registering Consumer on :%d\n", consumer_register_message.port)
 	fmt.Printf("[Broker] CONSUMER_REGISTER\n  Consumer: :%d\n  Group: %d\n  Port: %d\n", consumer_register_message.port, consumer_register_message.groupID, consumer_register_message.port)
+	broker.mu.Lock()
 	var topic_idx int = -1
 	if len(broker.topics) == 0 {
 		ntopic := &Topic{}
 		ntopic.init(consumer_register_message.topicID)
-		broker.topics = append(broker.topics, *ntopic)
+		broker.topics = append(broker.topics, ntopic)
 		topic_idx = len(broker.topics) - 1
 	} else {
 		for index, tp := range broker.topics {
@@ -161,7 +168,7 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 		if topic_idx == -1 {
 			ntopic := &Topic{}
 			ntopic.init(consumer_register_message.topicID)
-			broker.topics = append(broker.topics, *ntopic)
+			broker.topics = append(broker.topics, ntopic)
 			topic_idx = len(broker.topics) - 1
 		}
 	}
@@ -172,7 +179,8 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 		broker.topics[topic_idx].cgroups = append(broker.topics[topic_idx].cgroups, *ncgroup)
 		cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
 	} else {
-		for index, cg := range broker.topics[topic_idx].cgroups {
+		for index := range broker.topics[topic_idx].cgroups {
+			cg := &broker.topics[topic_idx].cgroups[index]
 			if cg.cgroupID == consumer_register_message.groupID {
 				cgroup_idx = index
 				break
@@ -185,6 +193,7 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 			cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
 		}
 	}
+	broker.mu.Unlock()
 	go func() {
 		conn, err := net.Dial("tcp", fmt.Sprintf(":%d", consumer_register_message.port))
 		if err != nil {
@@ -308,14 +317,12 @@ func (broker *Broker) sendAssignmentToConsumerGroup(topic_idx, cgroup_idx int) e
 	}
 	fmt.Println()
 	for _, consumer := range group.consumers {
-		broker.mu.Lock()
 		stream_rw := consumer.stream_rw
 		ass := &Message{
 			ASSIGNMENT: &Assignment{
 				assignment: consumer.partitionsOffset,
 			},
 		}
-		broker.mu.Unlock()
 		fmt.Printf("[Broker] Sending ASSIGNMENT\n  Consumer: %d\n  Partitions: %s\n", consumer.ConsumerID, strings.Join(func() []string {
 			s := make([]string, 0, len(consumer.partitionsOffset))
 			for _, p := range consumer.partitionsOffset {
@@ -342,7 +349,7 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 	if len(broker.topics) == 0 {
 		ntopic := &Topic{}
 		ntopic.init(producer_register_message.topicID)
-		broker.topics = append(broker.topics, *ntopic)
+		broker.topics = append(broker.topics, ntopic)
 		topic_idx = len(broker.topics) - 1
 	} else {
 		for index, tp := range broker.topics {
@@ -354,7 +361,7 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 		if topic_idx == -1 {
 			ntopic := &Topic{}
 			ntopic.init(producer_register_message.topicID)
-			broker.topics = append(broker.topics, *ntopic)
+			broker.topics = append(broker.topics, ntopic)
 			topic_idx = len(broker.topics) - 1
 		}
 	}

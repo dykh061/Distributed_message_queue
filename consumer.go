@@ -103,10 +103,13 @@ func (consumer *Consumer) StartConsumerServer() error {
 				consumer.assignment = resp.ASSIGNMENT.assignment
 				consumer.generation += 1
 				var ack = byte(1)
-				fmt.Printf("[Consumer %d] ASSIGNMENT received\n", consumer.port)
-				fmt.Printf("[Consumer %d] Subscribed: ", consumer.port)
+				fmt.Printf("[Consumer %d] ASSIGNMENT\n", consumer.port)
+				fmt.Printf("├─ Group:      %d\n", consumer.groupID)
+				fmt.Printf("└─ Partitions: ")
 				for i, p := range consumer.assignment {
-					if i > 0 { fmt.Print(", ") }
+					if i > 0 {
+						fmt.Print(", ")
+					}
 					fmt.Printf("P%d", p.partitionID)
 				}
 				fmt.Println()
@@ -131,7 +134,9 @@ func (consumer *Consumer) StartConsumerServer() error {
 						}
 					}
 				}
-				fmt.Printf("[Consumer %d] FETCH_ACK received\n  Partition: P%d\n  MessageCount: %d\n", consumer.port, resp.FETCH_ACK.partitionID, messageCount)
+				fmt.Printf("[Consumer %d] FETCH_ACK\n", consumer.port)
+				fmt.Printf("├─ Partition: P%d\n", resp.FETCH_ACK.partitionID)
+				fmt.Printf("└─ Messages:  %d\n", messageCount)
 				err := consumer.handleFetchAck(stream_rw, resp.FETCH_ACK)
 				if err != nil {
 					return err
@@ -139,7 +144,9 @@ func (consumer *Consumer) StartConsumerServer() error {
 			}
 			if resp.COMMIT_OFFSET_ACK != nil {
 				commitAck := resp.COMMIT_OFFSET_ACK
-				fmt.Printf("[Consumer %d] COMMIT_OFFSET_ACK received\n  Partition: P%d\n  CommittedOffset: %d\n", consumer.port, commitAck.partitionID, commitAck.offset)
+				fmt.Printf("[Consumer %d] COMMIT_ACK\n", consumer.port)
+				fmt.Printf("├─ Partition: P%d\n", commitAck.partitionID)
+				fmt.Printf("└─ Committed: %d\n", commitAck.offset)
 				err := consumer.updateCommitedOffset(commitAck.partitionID, commitAck.offset)
 				if err != nil {
 					return err
@@ -152,7 +159,6 @@ func (consumer *Consumer) StartConsumerServer() error {
 		}
 
 	}
-	return nil
 }
 
 func (consumer *Consumer) updateCommitedOffset(partitionID uint16, offset uint32) error {
@@ -175,7 +181,11 @@ func (consumer *Consumer) updateCommitedOffset(partitionID uint16, offset uint32
 }
 
 func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
-	fmt.Printf("[Consumer %d] FETCH\n  Partition: P%d\n  Offset: %d\n  MaxMessages: 100\n", consumer.port, partitionID, offset)
+	fmt.Printf("[Consumer %d] FETCH\n", consumer.port)
+	fmt.Printf("├─ Group:     %d\n", consumer.groupID)
+	fmt.Printf("├─ Partition: P%d\n", partitionID)
+	fmt.Printf("├─ Offset:    %d\n", offset)
+	fmt.Printf("└─ Max:       100\n")
 	Message := &Message{
 		FETCH: &Fetch{
 			partitionID: partitionID,
@@ -187,16 +197,26 @@ func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID 
 
 func (consumer *Consumer) handleFetchAck(stream_rw *bufio.ReadWriter, resp *FetchAck) error {
 	if !resp.found {
-		fmt.Printf("[Consumer %d] No new messages\n", consumer.port)
-		fmt.Printf("[Consumer %d] Retry fetch in 1s\n", consumer.port)
+		fmt.Printf("[Consumer %d] FETCH_ACK\n", consumer.port)
+		fmt.Printf("├─ Partition: P%d\n", resp.partitionID)
+		fmt.Printf("├─ Offset:    %d\n", resp.nextOffset)
+		fmt.Printf("└─ Messages:  0\n")
+		fmt.Printf("   └─ No new messages -> retry in 1s\n")
 		time.Sleep(1 * time.Second)
 		return consumer.fetchMessages(stream_rw, resp.partitionID, resp.nextOffset)
 	}
 	startOffset := resp.nextOffset - uint32(len(resp.data)/2)
 	messageCount := resp.nextOffset - startOffset
-	fmt.Printf("[Consumer %d] Processing messages\n  Partition: P%d\n  StartOffset: %d\n  MessageCount: %d\n  NextOffset: %d\n", consumer.port, resp.partitionID, startOffset, messageCount, resp.nextOffset)
+	fmt.Printf("[Consumer %d] PROCESS\n", consumer.port)
+	fmt.Printf("├─ Partition: P%d\n", resp.partitionID)
+	fmt.Printf("├─ StartOffset: %d\n", startOffset)
+	fmt.Printf("├─ Messages:   %d\n", messageCount)
+	fmt.Printf("└─ NextOffset: %d\n", resp.nextOffset)
 	commitOffset := consumer.readMsgFromPartitionLog(resp.data, resp.nextOffset, resp.partitionID)
-	fmt.Printf("[Consumer %d] Process completed\n  NextOffset: %d\n", consumer.port, commitOffset)
+	fmt.Printf("[Consumer %d] PROCESS_COMPLETE\n", consumer.port)
+	fmt.Printf("├─ Partition: P%d\n", resp.partitionID)
+	fmt.Printf("├─ Processed: %d\n", messageCount)
+	fmt.Printf("└─ NextOffset: %d\n", commitOffset)
 	return consumer.commitOffset(stream_rw, resp.partitionID, commitOffset)
 }
 
@@ -217,7 +237,8 @@ func (consumer *Consumer) readMsgFromPartitionLog(msg []byte, nextOffset uint32,
 		lenght := uint16(msg[pos])<<8 + uint16(msg[pos+1])
 		pos += 2                              // bỏ qua 2 byte độ dài của message
 		message := msg[pos : pos+int(lenght)] // lấy nội dùng message ra
-		fmt.Printf("Consumer received message from partition %d, offset %d: %s\n", partitionID, currentOffset+i, string(message))
+		fmt.Printf("\n    [Message %d] Offset: %d\n", i, currentOffset+i)
+		fmt.Printf("        %s\n", string(message))
 		commitOffset = currentOffset + i + 1 // cập nhật offset mới nhất đã đọc được + 1
 		consumer.assignment[partitionIDX].offset = commitOffset
 		pos += int(lenght)
@@ -227,7 +248,10 @@ func (consumer *Consumer) readMsgFromPartitionLog(msg []byte, nextOffset uint32,
 
 func (consumer *Consumer) commitOffset(stream_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
 	consumer.pendingCommit[partitionID] = offset
-	fmt.Printf("[Consumer %d] COMMIT_OFFSET\n  Group: %d\n  Partition: P%d\n  Offset: %d\n", consumer.port, consumer.groupID, partitionID, offset)
+	fmt.Printf("[Consumer %d] COMMIT\n", consumer.port)
+	fmt.Printf("├─ Group:     %d\n", consumer.groupID)
+	fmt.Printf("├─ Partition: P%d\n", partitionID)
+	fmt.Printf("└─ Offset:    %d\n", offset)
 	Message := &Message{
 		COMMIT_OFFSET: &CommitOffset{
 			TopicID:     consumer.topicID,

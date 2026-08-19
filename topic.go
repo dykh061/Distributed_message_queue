@@ -14,6 +14,7 @@ func (t *Topic) init(id uint16) {
 	t.topicID = id
 	t.partitions = make([]Partition, 3)
 	for i := range t.partitions {
+		t.partitions[i] = Partition{}
 		t.partitions[i].init(uint16(i))
 	}
 	t.cgroups = make([]ConsumerGroup, 0)
@@ -32,6 +33,8 @@ func (t *Topic) selectNextPartition() *Partition {
 }
 
 func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if cgroupIDX < 0 || cgroupIDX >= len(t.cgroups) {
 		return nil
 	}
@@ -39,8 +42,7 @@ func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
 	if len(cgroup.consumers) == 0 {
 		return nil
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
+
 	for i := range cgroup.consumers {
 		cgroup.consumers[i].partitionsOffset = nil
 	}
