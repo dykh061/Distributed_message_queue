@@ -1,5 +1,21 @@
 package main
 
+/*
+TODO :
+Đúng, bạn cần xử lý cả hai trường hợp:
+1. FETCH_ACK đã được broker gửi trước rebalance, nhưng consumer nhận nó sau khi đã nhận ASSIGNMENT mới.
+   → Consumer so sánh FETCH_ACK.generation với consumer.generation; khác thì continue bỏ ACK.
+2. FETCH generation cũ đến broker sau khi group đã rebalance sang generation mới.
+   → Broker so sánh FETCH.generation với ConsumerGroup.generation; khác thì không fetch/không trả ACK (hoặc trả lỗi stale generation).
+Như vậy generation được kiểm tra ở cả hai đầu:
+Consumer -- FETCH(gen=N) --> Broker
+Broker: N == group.generation ? xử lý : bỏ/từ chối
+
+Broker -- FETCH_ACK(gen=N) --> Consumer
+Consumer: N == consumer.generation ? xử lý : bỏ
+Để chặt chẽ hơn nữa, ở broker cũng nên xác minh consumer gửi FETCH đang là owner của partitionID theo assignment hiện tại.
+*/
+
 import (
 	"bufio"
 	"errors"
@@ -15,7 +31,7 @@ type Consumer struct {
 	groupID        uint16
 	assignment     []PartitionOffset // danh sách các partition mà consumer này được assign và offset mà consumer này đang đọc tới đâu
 	commitedOffset []PartitionOffset // Lưu các offset đã commit của từng partition
-	generation     uint16            // phiên bản của assignment hiện tại
+	generation     uint32            // phiên bản của assignment hiện tại
 	pendingCommit  map[uint16]uint32 // lưu các offset đang chờ commit của từng partition
 }
 
@@ -101,7 +117,7 @@ func (consumer *Consumer) StartConsumerServer() error {
 		if resp != nil {
 			if resp.ASSIGNMENT != nil {
 				consumer.assignment = resp.ASSIGNMENT.assignment
-				consumer.generation += 1
+				consumer.generation = resp.ASSIGNMENT.generation
 				var ack = byte(1)
 				fmt.Printf("[Consumer %d] ASSIGNMENT\n", consumer.port)
 				fmt.Printf("├─ Group:      %d\n", consumer.groupID)
@@ -126,6 +142,9 @@ func (consumer *Consumer) StartConsumerServer() error {
 			}
 			if resp.FETCH_ACK != nil {
 				messageCount := 0
+				if resp.FETCH_ACK.generation != consumer.generation {
+					continue // phiên bản assingment của log message không khớp với phiên bản hiện tại của consumer, bỏ qua message này
+				}
 				if resp.FETCH_ACK.found {
 					for _, p := range consumer.assignment {
 						if p.partitionID == resp.FETCH_ACK.partitionID {
@@ -190,6 +209,7 @@ func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID 
 		FETCH: &Fetch{
 			partitionID: partitionID,
 			offset:      offset,
+			generation:  consumer.generation,
 		},
 	}
 	return WriteMessageToStream(steam_rw, Message)

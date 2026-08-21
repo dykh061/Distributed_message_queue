@@ -7,16 +7,20 @@ import (
 )
 
 type ConsumerGroup struct {
-	mu        sync.RWMutex
-	cgroupID  uint16
-	consumers []Consumers       // lưu danh sách các consumer trong consumer group này
-	offset    []PartitionOffset // lưu danh sách các offset của từng partition mà consumer group này đang subscribe
+	mu             sync.RWMutex
+	cgroupID       uint16
+	consumers      []Consumers // lưu danh sách các consumer trong consumer group này
+	nextConsumerID uint16
+	offset         []PartitionOffset // lưu danh sách các offset của từng partition mà consumer group này đang subscribe
+	generation     uint32            // phiên bản của assingment
 }
 
 func (cg *ConsumerGroup) init(id uint16) {
 	cg.cgroupID = id
 	cg.consumers = make([]Consumers, 0)
 	cg.offset = make([]PartitionOffset, 0)
+	cg.generation = 0
+	cg.nextConsumerID = 0
 }
 
 type Consumers struct {

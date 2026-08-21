@@ -54,6 +54,7 @@ type FetchAck struct {
 	found       bool
 	nextOffset  uint32
 	data        []byte
+	generation  uint32
 }
 type CommitOffsetAck struct {
 	partitionID uint16
@@ -64,10 +65,12 @@ type CommitOffsetAck struct {
 type Fetch struct {
 	partitionID uint16
 	offset      uint32
+	generation  uint32
 }
 
 type Assignment struct {
 	assignment []PartitionOffset
+	generation uint32
 }
 type CommitOffset struct {
 	TopicID     uint16
@@ -104,7 +107,7 @@ func (coa *CommitOffsetAck) toByte() []byte {
 }
 
 func (fa *FetchAck) toByte() []byte {
-	data := make([]byte, 7)
+	data := make([]byte, 11)
 	data[0] = byte(fa.partitionID >> 8)
 	data[1] = byte(fa.partitionID & 0xFF)
 	if fa.found {
@@ -116,6 +119,10 @@ func (fa *FetchAck) toByte() []byte {
 	data[4] = byte((fa.nextOffset >> 16) & 0xFF)
 	data[5] = byte((fa.nextOffset >> 8) & 0xFF)
 	data[6] = byte(fa.nextOffset & 0xFF)
+	data[7] = byte(fa.generation >> 24)
+	data[8] = byte((fa.generation >> 16) & 0xFF)
+	data[9] = byte((fa.generation >> 8) & 0xFF)
+	data[10] = byte(fa.generation & 0xFF)
 	data = append(data, fa.data...)
 	return data
 }
@@ -124,35 +131,47 @@ func (fa *FetchAck) fromByte(data []byte) {
 	fa.partitionID = uint16(data[0])<<8 + uint16(data[1])
 	fa.found = data[2] == 1
 	fa.nextOffset = uint32(data[3])<<24 + uint32(data[4])<<16 + uint32(data[5])<<8 + uint32(data[6])
-	fa.data = data[7:]
+	fa.generation = uint32(data[7])<<24 + uint32(data[8])<<16 + uint32(data[9])<<8 + uint32(data[10])
+	fa.data = data[11:]
 }
 func (fe *Fetch) toByte() []byte {
-	var data [6]byte
+	var data [10]byte
 	data[0] = byte(fe.partitionID >> 8)
 	data[1] = byte(fe.partitionID & 0xFF)
 	data[2] = byte(fe.offset >> 24)
 	data[3] = byte((fe.offset >> 16) & 0xFF)
 	data[4] = byte((fe.offset >> 8) & 0xFF)
 	data[5] = byte(fe.offset & 0xFF)
-	return data[0:6]
+	data[6] = byte(fe.generation >> 24)
+	data[7] = byte((fe.generation >> 16) & 0xFF)
+	data[8] = byte((fe.generation >> 8) & 0xFF)
+	data[9] = byte(fe.generation & 0xFF)
+	return data[0:10]
 }
 
 func (fe *Fetch) fromByte(data []byte) {
 	fe.partitionID = uint16(data[0])<<8 + uint16(data[1])
 	fe.offset = uint32(data[2])<<24 + uint32(data[3])<<16 + uint32(data[4])<<8 + uint32(data[5])
+	fe.generation = uint32(data[6])<<24 + uint32(data[7])<<16 + uint32(data[8])<<8 + uint32(data[9])
+
 }
 
 func (a *Assignment) toByte() []byte {
-	res := make([]byte, 1+len(a.assignment)*6)
+	res := make([]byte, 5+len(a.assignment)*6)
 	res[0] = byte(len(a.assignment))
+	res[1] = byte(a.generation >> 24)
+	res[2] = byte((a.generation >> 16) & 0xFF)
+	res[3] = byte((a.generation >> 8) & 0xFF)
+	res[4] = byte(a.generation & 0xFF)
 	for i, assignment := range a.assignment {
-		pos := 1 + i*6
+		pos := 5 + i*6
 		res[pos] = byte(assignment.partitionID >> 8)
 		res[pos+1] = byte(assignment.partitionID & 0xFF)
 		res[pos+2] = byte(assignment.offset >> 24)
 		res[pos+3] = byte((assignment.offset >> 16) & 0xFF)
 		res[pos+4] = byte((assignment.offset >> 8) & 0xFF)
 		res[pos+5] = byte(assignment.offset & 0xFF)
+
 	}
 	return res
 }
@@ -160,11 +179,13 @@ func (a *Assignment) toByte() []byte {
 func (a *Assignment) fromByte(data []byte) {
 	// chuyển mảng byte thành struct assignment { partitionID , offset }
 	res := make([]PartitionOffset, data[0])
+	generation := uint32(data[1])<<24 + uint32(data[2])<<16 + uint32(data[3])<<8 + uint32(data[4])
 	for i := 0; i < int(data[0]); i++ {
-		pos := 1 + i*6
+		pos := 5 + i*6
 		res[i].partitionID = uint16(data[pos])<<8 + uint16(data[pos+1])
 		res[i].offset = uint32(data[pos+2])<<24 + uint32(data[pos+3])<<16 + uint32(data[pos+4])<<8 + uint32(data[pos+5])
 	}
+	a.generation = generation
 	a.assignment = res
 }
 

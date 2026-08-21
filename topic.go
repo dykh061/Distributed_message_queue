@@ -54,5 +54,6 @@ func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
 			offset:      cgroup.getOffset(partitionID),
 		})
 	}
+	cgroup.generation++
 	return nil
 }
