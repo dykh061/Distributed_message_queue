@@ -1,10 +1,5 @@
 package main
 
-/*
-TODO :Đúng. Với luồng xử lý chạy lâu như handleConsumerConnection, nên truyền topicID, groupID, consumerID thay vì slice index.
-Index chỉ phù hợp để truy cập ngắn hạn bên trong vùng lock. Nó không phải định danh ổn định vì slice có thể thêm/xóa/sắp xếp phần tử.
-*/
-
 import (
 	"bufio"
 	"errors"
@@ -26,40 +21,45 @@ func (broker *Broker) init() {
 	broker.topics = make([]*Topic, 0)
 }
 
-func (broker *Broker) printState(topicIdx int) {
-	broker.mu.RLock()
-	defer broker.mu.RUnlock()
-	if topicIdx < 0 || topicIdx >= len(broker.topics) {
-		return
-	}
+func (broker *Broker) printState(topic *Topic) {
+	topic.mu.RLock()
+	defer topic.mu.RUnlock()
 	fmt.Println("\n================ BROKER STATE ================")
-	topic := broker.topics[topicIdx]
-	fmt.Printf("TOPIC: %d\n\n", topic.topicID)
-	for i := range topic.partitions {
-		partition := &topic.partitions[i]
-		fmt.Printf("P%d\n  Messages: %d\n\n", partition.partitionID, partition.mq.count)
+	fmt.Printf("TOPIC: %d\n\n", (*topic).topicID)
+	fmt.Println("------------------------------------------------")
+	fmt.Printf("TOPIC: %d\n", topic.topicID)
+	fmt.Print("Partition: \n")
+	for i := range (*topic).partitions {
+		partition := (*topic).partitions[i]
+		fmt.Printf("P%d\n  Messages: %d\n\n", (*partition).partitionID, (*partition).mq.count)
 	}
 	if len(topic.cgroups) == 0 {
 		fmt.Println("================================================")
 		return
 	}
-	fmt.Printf("CONSUMER GROUP: %d\n\n", topic.cgroups[0].cgroupID)
+
 	for i := range topic.cgroups {
-		cg := &topic.cgroups[i]
-		fmt.Printf("Consumer %d\n", cg.cgroupID)
+		muCG := &topic.cgroups[i].mu
+		muCG.RLock()
+		cg := topic.cgroups[i]
+		fmt.Printf("GROUP: %d\n\n", cg.cgroupID)
+		fmt.Print("Member: \n\n")
 		for i := range cg.consumers {
-			consumer := &cg.consumers[i]
-			assignment := make([]string, 0, len(consumer.partitionsOffset))
-			for _, p := range consumer.partitionsOffset {
-				assignment = append(assignment, fmt.Sprintf("P%d", p.partitionID))
+			fmt.Printf("Consumer %d\n", (*cg).consumers[i].ConsumerID)
+			fmt.Printf("Assignment:  -> ")
+			result := make([]string, 0, len((*cg).consumers[i].partitionsOffset))
+			for _, p := range (*cg).consumers[i].partitionsOffset {
+				result = append(result, fmt.Sprintf("P%d", p.partitionID))
 			}
-			fmt.Printf("  Assignment: %s\n", strings.Join(assignment, ", "))
+			fmt.Printf("%s ", strings.Join(result, ", "))
 		}
-		for i := range cg.offset {
-			po := &cg.offset[i]
-			fmt.Printf("  P%d -> Next: %d | Commit: %d\n", po.partitionID, po.offset, po.offset)
+		fmt.Print("Offset: \n\n")
+		for i := range (*cg).offset {
+			po := (*cg).offset[i]
+			fmt.Printf("  P%d -> Next: %d | Last Committed Msg: %d\n", po.partitionID, po.offset, po.offset-1)
 		}
-		fmt.Println()
+
+		muCG.RUnlock()
 	}
 	fmt.Println("================================================")
 }
@@ -134,9 +134,9 @@ func (broker *Broker) processBrokerMessage(message *Message) (*Message, error) {
 	return nil, nil
 }
 
-func (broker *Broker) processProducerPCM(pcm_message []byte, idx int) (*byte, error) {
-	fmt.Printf("[Broker] PCM\n  Producer: :%d\n  Topic: %d\n", broker.topics[idx].topicID, broker.topics[idx].topicID)
-	partition := broker.topics[idx].selectNextPartition()
+func (broker *Broker) processProducerPCM(pcm_message []byte, topic *Topic) (*byte, error) {
+	fmt.Printf("[Broker] PCM\n  Producer Push Msg :\n  Topic: %d\n", topic.topicID)
+	partition := topic.selectNextPartition()
 	if partition == nil {
 		err := errors.New("No partition available for topic")
 		return nil, err
@@ -158,6 +158,7 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 	fmt.Printf("[Broker] CONSUMER_REGISTER\n  Consumer: :%d\n  Group: %d\n  Port: %d\n", consumer_register_message.port, consumer_register_message.groupID, consumer_register_message.port)
 	broker.mu.Lock()
 	var topic_idx int = -1
+	var topic *Topic = nil
 	if len(broker.topics) == 0 {
 		ntopic := &Topic{}
 		ntopic.init(consumer_register_message.topicID)
@@ -177,19 +178,21 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 			topic_idx = len(broker.topics) - 1
 		}
 	}
+	topic = broker.topics[topic_idx]
 	broker.mu.Unlock()
-	topicMutex := &broker.topics[topic_idx].mu
+	topicMutex := &topic.mu
 	topicMutex.Lock()
 	var cgroup_idx int = -1
-	if len(broker.topics[topic_idx].cgroups) == 0 {
+	var consumerGroup *ConsumerGroup = nil
+	if len(topic.cgroups) == 0 {
 		ncgroup := &ConsumerGroup{}
 		ncgroup.init(consumer_register_message.groupID)
-		broker.topics[topic_idx].cgroups = append(broker.topics[topic_idx].cgroups, *ncgroup)
-		cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
+		(*topic).cgroups = append((*topic).cgroups, ncgroup)
+		cgroup_idx = len((*topic).cgroups) - 1
 	} else {
-		for index := range broker.topics[topic_idx].cgroups {
-			cg := &broker.topics[topic_idx].cgroups[index]
-			if cg.cgroupID == consumer_register_message.groupID {
+		for index := range (*topic).cgroups {
+			cg := (*topic).cgroups[index]
+			if (*cg).cgroupID == consumer_register_message.groupID {
 				cgroup_idx = index
 				break
 			}
@@ -197,10 +200,11 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 		if cgroup_idx == -1 {
 			ncgroup := &ConsumerGroup{}
 			ncgroup.init(consumer_register_message.groupID)
-			broker.topics[topic_idx].cgroups = append(broker.topics[topic_idx].cgroups, *ncgroup)
-			cgroup_idx = len(broker.topics[topic_idx].cgroups) - 1
+			(*topic).cgroups = append((*topic).cgroups, ncgroup)
+			cgroup_idx = len((*topic).cgroups) - 1
 		}
 	}
+	consumerGroup = (*topic).cgroups[cgroup_idx]
 	topicMutex.Unlock()
 	go func() {
 		conn, err := net.Dial("tcp", fmt.Sprintf(":%d", consumer_register_message.port))
@@ -209,24 +213,25 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 		}
 		defer conn.Close()
 		stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-		broker.mu.Lock()
-		consumerID := broker.topics[topic_idx].cgroups[cgroup_idx].nextConsumerID + 1
-		broker.topics[topic_idx].cgroups[cgroup_idx].consumers = append(
-			broker.topics[topic_idx].cgroups[cgroup_idx].consumers,
-			Consumers{
+		cgMu := &consumerGroup.mu
+		cgMu.Lock()
+		consumerID := (*consumerGroup).nextConsumerID + 1
+		(*consumerGroup).consumers = append(
+			(*consumerGroup).consumers,
+			&Consumers{
 				conn:       conn,
 				stream_rw:  stream_rw,
 				ConsumerID: consumerID,
 			},
 		)
-		broker.topics[topic_idx].cgroups[cgroup_idx].nextConsumerID++
+		(*consumerGroup).nextConsumerID++
 		fmt.Printf("[Broker] Connecting to Consumer :%d\n", consumer_register_message.port)
 		fmt.Printf("[Broker] Consumer connected\n")
-		broker.mu.Unlock()
-		broker.topics[topic_idx].rebalanceConsumerGroup(cgroup_idx)
-		broker.sendAssignmentToConsumerGroup(topic_idx, cgroup_idx)
-		broker.printState(topic_idx)
-		err = broker.handleConsumerConnection(stream_rw, consumerID, topic_idx, cgroup_idx)
+		cgMu.Unlock()
+		(*consumerGroup).rebalanceConsumerGroup(topic.partitions)
+		broker.sendAssignmentToConsumerGroup(topic, consumerGroup)
+		broker.printState(topic)
+		err = broker.handleConsumerConnection(stream_rw, consumerID, topic, consumerGroup)
 		if err != nil {
 			panic(err)
 		}
@@ -234,12 +239,9 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 	var resp byte = 0
 	return &resp, nil
 
-	// giờ mình cần phải làm sao để gửi assiment cho từng consumer biết mỗi khi rebalance xong thì nó tự pull log về mà đọc
-	// sau đó nó commit offset về cho broker biết là nó đã đọc đến đâu rồi
-
 }
 
-func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, consumerID uint16, topic_idx, cgroup_idx int) error {
+func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, consumerID uint16, topic *Topic, cgroup *ConsumerGroup) error {
 	for {
 		resp, err := ReadMessageFromStream(stream_rw)
 		if err != nil {
@@ -253,13 +255,13 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, cons
 				CommitOffset := resp.COMMIT_OFFSET
 				partitionID := CommitOffset.PartitionID
 				fmt.Printf("[Broker] COMMIT_OFFSET received\n  Group: %d\n  Partition: P%d\n  Offset: %d\n", CommitOffset.GroupID, partitionID, CommitOffset.Offset)
-				if CommitOffset.GroupID != broker.topics[topic_idx].cgroups[cgroup_idx].cgroupID ||
-					CommitOffset.TopicID != broker.topics[topic_idx].topicID {
+				if CommitOffset.GroupID != cgroup.cgroupID ||
+					CommitOffset.TopicID != topic.topicID {
 					return errors.New("Commit offset message has mismatched group or topic ID")
 				}
-				success := broker.topics[topic_idx].cgroups[cgroup_idx].commitOffset(partitionID, CommitOffset.Offset)
+				success := cgroup.commitOffset(partitionID, CommitOffset.Offset)
 				fmt.Println("[Broker] Updating committed offset")
-				fmt.Printf("  group-%d\n    P%d: %d → %d\n", CommitOffset.GroupID, partitionID, broker.topics[topic_idx].cgroups[cgroup_idx].getOffset(partitionID), CommitOffset.Offset)
+				fmt.Printf("  group-%d\n    P%d: %d → %d\n", CommitOffset.GroupID, partitionID, cgroup.getOffset(partitionID), CommitOffset.Offset)
 				var ack = CommitOffsetAck{
 					partitionID: partitionID,
 					offset:      CommitOffset.Offset,
@@ -273,13 +275,12 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, cons
 				if err != nil {
 					return err
 				}
-				broker.printState(topic_idx)
+				broker.printState(topic)
 			}
 			if resp.FETCH != nil {
-				topic_mutex := &broker.topics[topic_idx].mu
-				topic_mutex.Lock()
+				cgroup.mu.Lock()
 				partitionID := resp.FETCH.partitionID
-				listconsumer := broker.topics[topic_idx].cgroups[cgroup_idx].consumers
+				listconsumer := cgroup.consumers
 				cidx := -1
 				for i := range listconsumer {
 					if listconsumer[i].ConsumerID == consumerID {
@@ -288,12 +289,12 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, cons
 					}
 				}
 				if cidx == -1 { // còn optimize chỗ này
-					fmt.Printf("[Broker] Consumer %d not found in consumer group %d\n", consumerID, broker.topics[topic_idx].cgroups[cgroup_idx].cgroupID)
-
-					topic_mutex.Unlock()
+					fmt.Printf("[Broker] Consumer %d not found in consumer group %d\n", consumerID, cgroup.cgroupID)
+					cgroup.mu.Unlock()
 					continue
 				}
-				parts := listconsumer[cidx].partitionsOffset
+				consumer := listconsumer[cidx]
+				parts := consumer.partitionsOffset
 				flag := false
 				for i := range parts {
 					if parts[i].partitionID == partitionID {
@@ -304,42 +305,49 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, cons
 
 				if !flag {
 					fmt.Printf("[Broker] Consumer %d is not assigned to partition P%d\n", consumerID, partitionID)
-					topic_mutex.Unlock()
+					cgroup.mu.Unlock()
 					continue
 				}
-				if resp.FETCH.generation != broker.topics[topic_idx].cgroups[cgroup_idx].generation {
-					fmt.Printf("[Broker] Consumer %d has outdated generation %d, current generation is %d\n", consumerID, resp.FETCH.generation, broker.topics[topic_idx].cgroups[cgroup_idx].generation)
-					topic_mutex.Unlock()
+				if resp.FETCH.generation != cgroup.generation {
+					fmt.Printf("[Broker] Consumer %d has outdated generation %d, current generation is %d\n", consumerID, resp.FETCH.generation, cgroup.generation)
+					cgroup.mu.Unlock()
 					continue
 				}
-				topic_mutex.Unlock()
+				cgroup.mu.Unlock()
 
-				fmt.Printf("[Broker] FETCH received\n  Consumer: %d\n  Group: %d\n  Partition: P%d\n  Offset: %d\n", cgroup_idx, broker.topics[topic_idx].cgroups[cgroup_idx].cgroupID, partitionID, resp.FETCH.offset)
+				fmt.Printf("[Broker] FETCH received\n  Consumer: %d\n  Group: %d\n  Partition: P%d\n  Offset: %d\n", consumer.ConsumerID, cgroup.cgroupID, partitionID, resp.FETCH.offset)
 				var partitionIDX int = -1
-				for i := range broker.topics[topic_idx].partitions {
-					if broker.topics[topic_idx].partitions[i].partitionID == partitionID {
+				topic.mu.RLock()
+				for i := range topic.partitions {
+					if topic.partitions[i].partitionID == partitionID {
 						partitionIDX = i
 						break
 					}
 				}
+				if partitionIDX == -1 {
+					topic.mu.RUnlock()
+					fmt.Printf("[Broker] Partition P%d not found in topic %d\n", partitionID, topic.topicID)
+					continue
+				}
 				if partitionIDX != -1 {
-					messages, nextOffset, found := broker.topics[topic_idx].partitions[partitionIDX].mq.fetchMessage(uint16(100), resp.FETCH.offset)
+					messages, nextOffset, found := topic.partitions[partitionIDX].mq.fetchMessage(uint16(100), resp.FETCH.offset)
 					if !found {
 						fmt.Printf("[Broker] No messages available\n")
 					} else {
 						messageCount := int(nextOffset - resp.FETCH.offset)
 						fmt.Printf("[Broker] Reading P%d\n  Available messages: %d\n", partitionID, messageCount)
-						fmt.Printf("[Broker] Sending FETCH_ACK\n  Consumer: %d\n  Partition: P%d\n  StartOffset: %d\n  MessageCount: %d\n  NextOffset: %d\n", cgroup_idx, partitionID, resp.FETCH.offset, messageCount, nextOffset)
+						fmt.Printf("[Broker] Sending FETCH_ACK\n  Consumer: %d\n  Partition: P%d\n  StartOffset: %d\n  MessageCount: %d\n  NextOffset: %d\n", consumer.ConsumerID, partitionID, resp.FETCH.offset, messageCount, nextOffset)
 					}
 					fetch_ack := &Message{
 						FETCH_ACK: &FetchAck{
-							partitionID: broker.topics[topic_idx].partitions[partitionIDX].partitionID,
+							partitionID: topic.partitions[partitionIDX].partitionID,
 							found:       found,
 							nextOffset:  nextOffset,
 							data:        messages,
 							generation:  resp.FETCH.generation,
 						},
 					}
+					topic.mu.RUnlock()
 					err = WriteMessageToStream(stream_rw, fetch_ack)
 					if err != nil {
 						fmt.Printf("Error writing fetch ack to stream: %v\n", err)
@@ -350,11 +358,10 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, cons
 	}
 }
 
-func (broker *Broker) sendAssignmentToConsumerGroup(topic_idx, cgroup_idx int) error {
+func (broker *Broker) sendAssignmentToConsumerGroup(topic *Topic, group *ConsumerGroup) error {
 	var err error
-	group := &broker.topics[topic_idx].cgroups[cgroup_idx]
 	fmt.Println("========== REBALANCE ==========")
-	fmt.Printf("Group: %d\nConsumers: %d\nPartitions: %d\n\n", group.cgroupID, len(group.consumers), len(broker.topics[topic_idx].partitions))
+	fmt.Printf("Group: %d\nConsumers: %d\nPartitions: %d\n\n", group.cgroupID, len(group.consumers), len(topic.partitions))
 	fmt.Println("[Assignment]")
 	for _, consumer := range group.consumers {
 		parts := make([]string, 0, len(consumer.partitionsOffset))
@@ -414,6 +421,7 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 			topic_idx = len(broker.topics) - 1
 		}
 	}
+	topic := broker.topics[topic_idx]
 	go func() { // dial to the producer and send a message to it to confirm the registration
 
 		// connect to the server on localhost:some port
@@ -430,7 +438,7 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 			}
 			var resp *byte = nil
 			if parsed_message.PCM != nil {
-				resp, err = broker.processProducerPCM(parsed_message.PCM, topic_idx)
+				resp, err = broker.processProducerPCM(parsed_message.PCM, topic)
 				if err != nil {
 					panic(err)
 				}

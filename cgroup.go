@@ -9,7 +9,7 @@ import (
 type ConsumerGroup struct {
 	mu             sync.RWMutex
 	cgroupID       uint16
-	consumers      []Consumers // lưu danh sách các consumer trong consumer group này
+	consumers      []*Consumers // lưu danh sách các consumer trong consumer group này
 	nextConsumerID uint16
 	offset         []PartitionOffset // lưu danh sách các offset của từng partition mà consumer group này đang subscribe
 	generation     uint32            // phiên bản của assingment
@@ -17,7 +17,7 @@ type ConsumerGroup struct {
 
 func (cg *ConsumerGroup) init(id uint16) {
 	cg.cgroupID = id
-	cg.consumers = make([]Consumers, 0)
+	cg.consumers = make([]*Consumers, 0)
 	cg.offset = make([]PartitionOffset, 0)
 	cg.generation = 0
 	cg.nextConsumerID = 0
@@ -63,4 +63,27 @@ func (cg *ConsumerGroup) commitOffset(partitionID uint16, offset uint32) bool {
 		offset:      offset,
 	})
 	return true
+}
+
+func (cg *ConsumerGroup) rebalanceConsumerGroup(p []*Partition) error {
+	cg.mu.Lock()
+	defer cg.mu.Unlock()
+	if len((*cg).consumers) == 0 {
+		return nil
+	}
+
+	for i := range (*cg).consumers {
+		(*cg).consumers[i].partitionsOffset = nil
+	}
+
+	for i := range p {
+		partitionID := p[i].partitionID
+		consumerIDX := i % len(cg.consumers)
+		cg.consumers[consumerIDX].partitionsOffset = append(cg.consumers[consumerIDX].partitionsOffset, PartitionOffset{
+			partitionID: partitionID,
+			offset:      cg.getOffset(partitionID),
+		})
+	}
+	cg.generation++
+	return nil
 }

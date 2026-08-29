@@ -1,21 +1,5 @@
 package main
 
-/*
-TODO :
-Đúng, bạn cần xử lý cả hai trường hợp:
-1. FETCH_ACK đã được broker gửi trước rebalance, nhưng consumer nhận nó sau khi đã nhận ASSIGNMENT mới.
-   → Consumer so sánh FETCH_ACK.generation với consumer.generation; khác thì continue bỏ ACK.
-2. FETCH generation cũ đến broker sau khi group đã rebalance sang generation mới.
-   → Broker so sánh FETCH.generation với ConsumerGroup.generation; khác thì không fetch/không trả ACK (hoặc trả lỗi stale generation).
-Như vậy generation được kiểm tra ở cả hai đầu:
-Consumer -- FETCH(gen=N) --> Broker
-Broker: N == group.generation ? xử lý : bỏ/từ chối
-
-Broker -- FETCH_ACK(gen=N) --> Consumer
-Consumer: N == consumer.generation ? xử lý : bỏ
-Để chặt chẽ hơn nữa, ở broker cũng nên xác minh consumer gửi FETCH đang là owner của partitionID theo assignment hiện tại.
-*/
-
 import (
 	"bufio"
 	"errors"
@@ -113,8 +97,7 @@ func (consumer *Consumer) StartConsumerServer() error {
 		}
 		if resp == nil {
 			continue
-		}
-		if resp != nil {
+		} else {
 			if resp.ASSIGNMENT != nil {
 				consumer.assignment = resp.ASSIGNMENT.assignment
 				consumer.generation = resp.ASSIGNMENT.generation

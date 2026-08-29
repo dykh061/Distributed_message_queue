@@ -5,19 +5,19 @@ import "sync"
 type Topic struct {
 	mu            sync.RWMutex
 	topicID       uint16
-	partitions    []Partition
-	cgroups       []ConsumerGroup
+	partitions    []*Partition
+	cgroups       []*ConsumerGroup
 	nextPartition uint32
 }
 
 func (t *Topic) init(id uint16) {
 	t.topicID = id
-	t.partitions = make([]Partition, 3)
+	t.partitions = make([]*Partition, 3)
 	for i := range t.partitions {
-		t.partitions[i] = Partition{}
+		t.partitions[i] = &Partition{}
 		t.partitions[i].init(uint16(i))
 	}
-	t.cgroups = make([]ConsumerGroup, 0)
+	t.cgroups = make([]*ConsumerGroup, 0)
 	t.nextPartition = 0
 }
 
@@ -29,31 +29,5 @@ func (t *Topic) selectNextPartition() *Partition {
 	}
 	idx := t.nextPartition
 	t.nextPartition = (t.nextPartition + 1) % uint32(len(t.partitions))
-	return &t.partitions[idx]
-}
-
-func (t *Topic) rebalanceConsumerGroup(cgroupIDX int) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if cgroupIDX < 0 || cgroupIDX >= len(t.cgroups) {
-		return nil
-	}
-	cgroup := &t.cgroups[cgroupIDX]
-	if len(cgroup.consumers) == 0 {
-		return nil
-	}
-
-	for i := range cgroup.consumers {
-		cgroup.consumers[i].partitionsOffset = nil
-	}
-	for i := range t.partitions {
-		partitionID := t.partitions[i].partitionID
-		consumerIDX := i % len(cgroup.consumers)
-		cgroup.consumers[consumerIDX].partitionsOffset = append(cgroup.consumers[consumerIDX].partitionsOffset, PartitionOffset{
-			partitionID: partitionID,
-			offset:      cgroup.getOffset(partitionID),
-		})
-	}
-	cgroup.generation++
-	return nil
+	return t.partitions[idx]
 }

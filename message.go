@@ -1,10 +1,5 @@
 package main
 
-// Message util (
-// + Message
-// + Read and Write
-// + Parse )
-
 import (
 	"bufio"
 	"fmt"
