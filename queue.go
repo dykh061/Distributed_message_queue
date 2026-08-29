@@ -37,6 +37,11 @@ func (q *Queue) push(data []byte) {
 	q.tail %= ASLOT * SLOT_SIZE
 }
 
+func (q *Queue) getCount() uint32 {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.count
+}
 func (q *Queue) pop() []byte {
 	q.mu.Lock()
 	defer q.mu.Unlock()

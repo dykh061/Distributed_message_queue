@@ -35,9 +35,7 @@ type PartitionOffset struct {
 	offset      uint32
 }
 
-func (cg *ConsumerGroup) getOffset(partitionID uint16) uint32 {
-	cg.mu.RLock()
-	defer cg.mu.RUnlock()
+func (cg *ConsumerGroup) getOffsetLocked(partitionID uint16) uint32 {
 	if len(cg.offset) == 0 {
 		return uint32(0)
 	}
@@ -47,6 +45,12 @@ func (cg *ConsumerGroup) getOffset(partitionID uint16) uint32 {
 		}
 	}
 	return uint32(0)
+}
+
+func (cg *ConsumerGroup) getOffset(partitionID uint16) uint32 {
+	cg.mu.RLock()
+	defer cg.mu.RUnlock()
+	return cg.getOffsetLocked(partitionID)
 }
 
 func (cg *ConsumerGroup) commitOffset(partitionID uint16, offset uint32) bool {
@@ -81,7 +85,7 @@ func (cg *ConsumerGroup) rebalanceConsumerGroup(p []*Partition) error {
 		consumerIDX := i % len(cg.consumers)
 		cg.consumers[consumerIDX].partitionsOffset = append(cg.consumers[consumerIDX].partitionsOffset, PartitionOffset{
 			partitionID: partitionID,
-			offset:      cg.getOffset(partitionID),
+			offset:      cg.getOffsetLocked(partitionID),
 		})
 	}
 	cg.generation++
