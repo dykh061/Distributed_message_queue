@@ -2,7 +2,17 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
+	"io"
+)
+
+const (
+	// Error trong quá trình fetch
+	ERR_OK                  = 0
+	ERR_NOT_ASSIGNED        = 11
+	ERR_ILLEGAL_GENERATION  = 12
+	ERR_PARTITION_NOT_FOUND = 13
 )
 
 const (
@@ -23,6 +33,9 @@ const (
 	ASSIGNMENT_ACK             = 105
 	FETCH_ACK                  = 106
 	COMMIT_OFFSET_ACK          = 107
+
+	// ERRORS
+	ERROR_CONSUMER_NO_LONGER_IN_GROUP = 201
 )
 
 type Message struct {
@@ -33,6 +46,7 @@ type Message struct {
 	COMMIT_OFFSET     *CommitOffset
 	ASSIGNMENT        *Assignment
 	FETCH             *Fetch
+
 	// other message types can be added here
 
 	// ACK
@@ -43,10 +57,14 @@ type Message struct {
 	ASSIGNMENT_ACK             *byte
 	FETCH_ACK                  *FetchAck
 	COMMIT_OFFSET_ACK          *CommitOffsetAck
+
+	// ERRORS
+	ERROR_CONSUMER_NO_LONGER_IN_GROUP *byte
 }
 type FetchAck struct {
 	partitionID uint16
 	found       bool
+	errCode     uint8
 	nextOffset  uint32
 	data        []byte
 	generation  uint32
@@ -54,6 +72,7 @@ type FetchAck struct {
 type CommitOffsetAck struct {
 	partitionID uint16
 	offset      uint32
+	generation  uint32
 	success     bool
 }
 
@@ -72,6 +91,7 @@ type CommitOffset struct {
 	GroupID     uint16
 	Offset      uint32
 	PartitionID uint16
+	Generation  uint32
 }
 
 type ProducerRegister struct {
@@ -82,27 +102,59 @@ type ProducerRegister struct {
 func (coa *CommitOffsetAck) fromByte(data []byte) {
 	coa.partitionID = uint16(data[0])<<8 + uint16(data[1])
 	coa.offset = uint32(data[2])<<24 + uint32(data[3])<<16 + uint32(data[4])<<8 + uint32(data[5])
-	coa.success = data[6] == 1
+	coa.generation = uint32(data[6])<<24 + uint32(data[7])<<16 + uint32(data[8])<<8 + uint32(data[9])
+	coa.success = data[10] == 1
 }
 
 func (coa *CommitOffsetAck) toByte() []byte {
-	data := make([]byte, 7)
+	data := make([]byte, 11)
 	data[0] = byte(coa.partitionID >> 8)
 	data[1] = byte(coa.partitionID & 0xFF)
 	data[2] = byte(coa.offset >> 24)
 	data[3] = byte((coa.offset >> 16) & 0xFF)
 	data[4] = byte((coa.offset >> 8) & 0xFF)
 	data[5] = byte(coa.offset & 0xFF)
+	data[6] = byte(coa.generation >> 24)
+	data[7] = byte((coa.generation >> 16) & 0xFF)
+	data[8] = byte((coa.generation >> 8) & 0xFF)
+	data[9] = byte(coa.generation & 0xFF)
 	if coa.success {
-		data[6] = byte(1)
+		data[10] = byte(1)
 	} else {
-		data[6] = byte(0)
+		data[10] = byte(0)
 	}
 	return data
 }
 
+func (co *CommitOffset) toByte() []byte {
+	var coData [14]byte
+	coData[0] = byte(co.TopicID >> 8)
+	coData[1] = byte(co.TopicID & 0xFF)
+	coData[2] = byte(co.GroupID >> 8)
+	coData[3] = byte(co.GroupID & 0xFF)
+	coData[4] = byte(co.Offset >> 24)
+	coData[5] = byte((co.Offset >> 16) & 0xFF)
+	coData[6] = byte((co.Offset >> 8) & 0xFF)
+	coData[7] = byte(co.Offset & 0xFF)
+	coData[8] = byte(co.PartitionID >> 8)
+	coData[9] = byte(co.PartitionID & 0xFF)
+	coData[10] = byte(co.Generation >> 24)
+	coData[11] = byte((co.Generation >> 16) & 0xFF)
+	coData[12] = byte((co.Generation >> 8) & 0xFF)
+	coData[13] = byte(co.Generation & 0xFF)
+	return coData[:]
+}
+
+func (co *CommitOffset) fromByte(data []byte) {
+	co.TopicID = uint16(data[0])<<8 + uint16(data[1])
+	co.GroupID = uint16(data[2])<<8 + uint16(data[3])
+	co.Offset = uint32(data[4])<<24 + uint32(data[5])<<16 + uint32(data[6])<<8 + uint32(data[7])
+	co.PartitionID = uint16(data[8])<<8 + uint16(data[9])
+	co.Generation = uint32(data[10])<<24 + uint32(data[11])<<16 + uint32(data[12])<<8 + uint32(data[13])
+}
+
 func (fa *FetchAck) toByte() []byte {
-	data := make([]byte, 11)
+	data := make([]byte, 12)
 	data[0] = byte(fa.partitionID >> 8)
 	data[1] = byte(fa.partitionID & 0xFF)
 	if fa.found {
@@ -110,14 +162,15 @@ func (fa *FetchAck) toByte() []byte {
 	} else {
 		data[2] = 0
 	}
-	data[3] = byte(fa.nextOffset >> 24)
-	data[4] = byte((fa.nextOffset >> 16) & 0xFF)
-	data[5] = byte((fa.nextOffset >> 8) & 0xFF)
-	data[6] = byte(fa.nextOffset & 0xFF)
-	data[7] = byte(fa.generation >> 24)
-	data[8] = byte((fa.generation >> 16) & 0xFF)
-	data[9] = byte((fa.generation >> 8) & 0xFF)
-	data[10] = byte(fa.generation & 0xFF)
+	data[3] = byte(fa.errCode)
+	data[4] = byte(fa.nextOffset >> 24)
+	data[5] = byte((fa.nextOffset >> 16) & 0xFF)
+	data[6] = byte((fa.nextOffset >> 8) & 0xFF)
+	data[7] = byte(fa.nextOffset & 0xFF)
+	data[8] = byte(fa.generation >> 24)
+	data[9] = byte((fa.generation >> 16) & 0xFF)
+	data[10] = byte((fa.generation >> 8) & 0xFF)
+	data[11] = byte(fa.generation & 0xFF)
 	data = append(data, fa.data...)
 	return data
 }
@@ -125,9 +178,10 @@ func (fa *FetchAck) toByte() []byte {
 func (fa *FetchAck) fromByte(data []byte) {
 	fa.partitionID = uint16(data[0])<<8 + uint16(data[1])
 	fa.found = data[2] == 1
-	fa.nextOffset = uint32(data[3])<<24 + uint32(data[4])<<16 + uint32(data[5])<<8 + uint32(data[6])
-	fa.generation = uint32(data[7])<<24 + uint32(data[8])<<16 + uint32(data[9])<<8 + uint32(data[10])
-	fa.data = data[11:]
+	fa.errCode = data[3]
+	fa.nextOffset = uint32(data[4])<<24 + uint32(data[5])<<16 + uint32(data[6])<<8 + uint32(data[7])
+	fa.generation = uint32(data[8])<<24 + uint32(data[9])<<16 + uint32(data[10])<<8 + uint32(data[11])
+	fa.data = data[12:]
 }
 func (fe *Fetch) toByte() []byte {
 	var data [10]byte
@@ -228,19 +282,21 @@ func (cr *ConsumerRegister) fromByte(data []byte) {
 }
 func readFromStream(stream_rd *bufio.ReadWriter) ([]byte, error) {
 	var err error
-	header, err := stream_rd.ReadByte()
-	if err != nil {
+	var header [4]byte
+	if _, err := io.ReadFull(stream_rd, header[:]); err != nil { // đọc ra 4 byte đầu tiên dựa vào kích thước của biến header
 		return nil, err
 	}
-	data, err := stream_rd.Peek(int(header))
-	if err != nil {
+	frameLength := binary.BigEndian.Uint32(header[:]) // chuyển 4 byte đầu tiên thành uint32 để biết được độ dài của frame tiếp theo
+	if frameLength == 0 {
 		return nil, err
 	}
-	_, err = stream_rd.Discard(int(header))
-	if err != nil {
+	data := make([]byte, frameLength)
+	if _, err := io.ReadFull(stream_rd, data); err != nil {
 		return nil, err
 	}
+
 	return data, err
+
 }
 
 func parseMessage(stream_message []byte) *Message {
@@ -255,10 +311,7 @@ func parseMessage(stream_message []byte) *Message {
 		return &Message{ECHO: &st}
 	case COMMIT_OFFSET:
 		var co = &CommitOffset{}
-		co.TopicID = uint16(stream_message[1])<<8 + uint16(stream_message[2])
-		co.GroupID = uint16(stream_message[3])<<8 + uint16(stream_message[4])
-		co.Offset = uint32(stream_message[5])<<24 + uint32(stream_message[6])<<16 + uint32(stream_message[7])<<8 + uint32(stream_message[8])
-		co.PartitionID = uint16(stream_message[9])<<8 + uint16(stream_message[10])
+		co.fromByte(stream_message[1:])
 		return &Message{COMMIT_OFFSET: co}
 	case RESPONSE_ECHO:
 		var st = string(stream_message[1:])
@@ -306,6 +359,10 @@ func parseMessage(stream_message []byte) *Message {
 		var coa = &CommitOffsetAck{}
 		coa.fromByte(stream_message[1:])
 		return &Message{COMMIT_OFFSET_ACK: coa}
+	case ERROR_CONSUMER_NO_LONGER_IN_GROUP:
+		var st = stream_message[1]
+		return &Message{ERROR_CONSUMER_NO_LONGER_IN_GROUP: &st}
+
 	default:
 		return nil
 	}
@@ -322,7 +379,10 @@ func ReadMessageFromStream(stream_rd *bufio.ReadWriter) (*Message, error) {
 func writeDataToStreamWithType(stream_wt *bufio.ReadWriter, messageType byte, data string) error {
 	var err error
 	// Write size
-	err = stream_wt.WriteByte(byte(len(data) + 1))
+	frameLength := uint32(len(data) + 1) // tạo 1 frameLength = độ dài của data + 1 byte cho messageType
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], frameLength) // chuyển frameLength thành 4 byte và lưu vào header
+	_, err = stream_wt.Write(header[:])                // ghi 4 byte đầu tiên vào stream
 	if err != nil {
 		return err
 	}
@@ -352,21 +412,7 @@ func WriteSerializableToStream(stream_wt *bufio.ReadWriter, messageType byte, da
 }
 
 func WriteMessageCommitOffsetToStream(stream_wt *bufio.ReadWriter, messageType byte, data *CommitOffset) error {
-	var coData [10]byte
-	coData[0] = byte(data.TopicID >> 8)
-	coData[1] = byte(data.TopicID & 0xFF)
-	coData[2] = byte(data.GroupID >> 8)
-	coData[3] = byte(data.GroupID & 0xFF)
-	coData[4] = byte(data.Offset >> 24)
-	coData[5] = byte((data.Offset >> 16) & 0xFF)
-	coData[6] = byte((data.Offset >> 8) & 0xFF)
-	coData[7] = byte(data.Offset & 0xFF)
-	coData[8] = byte(data.PartitionID >> 8)
-	coData[9] = byte(data.PartitionID & 0xFF)
-	if err := writeDataToStreamWithType(stream_wt, COMMIT_OFFSET, string(coData[:])); err != nil {
-		return err
-	}
-	return nil
+	return writeDataToStreamWithType(stream_wt, messageType, string(data.toByte()))
 }
 
 func WriteMessageToStream(stream_wt *bufio.ReadWriter, message *Message) error {
@@ -425,5 +471,22 @@ func WriteMessageToStream(stream_wt *bufio.ReadWriter, message *Message) error {
 			return err
 		}
 	}
+	if message.COMMIT_OFFSET != nil {
+		if err := WriteSerializableToStream(stream_wt, COMMIT_OFFSET, message.COMMIT_OFFSET); err != nil {
+			return err
+		}
+	}
+	if message.COMMIT_OFFSET_ACK != nil {
+		if err := WriteSerializableToStream(stream_wt, COMMIT_OFFSET_ACK, message.COMMIT_OFFSET_ACK); err != nil {
+			return err
+		}
+	}
+	if message.ERROR_CONSUMER_NO_LONGER_IN_GROUP != nil {
+		data := fmt.Sprintf("%d", *message.ERROR_CONSUMER_NO_LONGER_IN_GROUP)
+		if err := writeDataToStreamWithType(stream_wt, ERROR_CONSUMER_NO_LONGER_IN_GROUP, data); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"sync"
 )
 
@@ -82,22 +81,6 @@ func (q *Queue) peekLocked(offset uint) []byte { // hàm này được dùng khi
 	data := make([]byte, size)
 	copy(data, q.arr[posision:posision+size])
 	return data
-}
-
-func (q *Queue) debug() {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-	cur := q.head
-	fmt.Print("Debug Message Queue: \n")
-	for {
-		data := q.arr[cur : cur+uint32(q.Size[cur])]
-		fmt.Printf("%s", string(data))
-		cur += 255
-		cur %= ASLOT * SLOT_SIZE
-		if cur == q.tail {
-			break
-		}
-	}
 }
 
 func (q *Queue) fetchMessage(maxMessages uint16, offset uint32) (data []byte, nextOffset uint32, found bool) {

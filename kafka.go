@@ -7,8 +7,6 @@ import (
 )
 
 func main() {
-	fmt.Println(os.Args)
-
 	// os.Args[0] is the name of the program(os.Args vị trí 0 là tên của chương trình )
 	// so we need at least 2 arguments to run as server or client. (Nên chúng ta cần lấy từ vị trí 1 trở đi để biết cần chạy server hay client)
 	// Run as server if the first argument is "server", otherwise run as client. (Khởi động server nếu tham số đầu tiên là "server", ngược lại chạy như client)

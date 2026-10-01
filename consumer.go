@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+var ErrConsumerNoLongerInGroup = errors.New("consumer is no longer in consumer group")
+
 type Consumer struct {
 	port           uint16
 	topicID        uint16
@@ -50,12 +52,9 @@ func (consumer *Consumer) registerWithBroker() error {
 		return err
 	}
 	if resp.RESPONSE_CONSUMER_REGISTER == nil {
-		fmt.Println("[Broker] Consumer registration failed")
+		printEvent("CONSUMER REGISTRATION FAILED", fmt.Sprintf("Consumer: %d", consumer.port))
 	} else {
-		fmt.Printf("[Consumer %d] Listening on :%d\n", consumer.port, consumer.port)
-		fmt.Printf("[Broker] CONSUMER_REGISTER\n  Consumer: %d\n  Group: %d\n  Port: %d\n", consumer.port, consumer.groupID, consumer.port)
-		fmt.Printf("[Broker] Connecting to Consumer :%d\n", consumer.port)
-		fmt.Printf("[Broker] Consumer %d connected\n", consumer.port)
+		printEvent(fmt.Sprintf("CONSUMER %d JOINED", consumer.port), fmt.Sprintf("Listening on :%d", consumer.port), fmt.Sprintf("Group: %d", consumer.groupID), fmt.Sprintf("Topic: %d", consumer.topicID), "Broker connection established")
 	}
 	return nil
 }
@@ -71,96 +70,31 @@ func (consumer *Consumer) StartConsumerServer() error {
 	if err != nil {
 		return err
 	}
-	// connect to broker to send register
-	err = consumer.registerWithBroker()
-	if err != nil {
-		return err
-	}
-
 	defer l.Close()
-	conn, err := l.Accept()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		err := conn.Close()
-		if err != nil {
-			log.Println(err)
-		}
-	}()
-	stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+
 	for {
-		resp, err := ReadMessageFromStream(stream_rw)
+		// connect to broker to send register
+		err = consumer.registerWithBroker()
 		if err != nil {
-			log.Println(err)
 			return err
 		}
-		if resp == nil {
-			continue
-		} else {
-			if resp.ASSIGNMENT != nil {
-				consumer.assignment = resp.ASSIGNMENT.assignment
-				consumer.generation = resp.ASSIGNMENT.generation
-				var ack = byte(1)
-				fmt.Printf("[Consumer %d] ASSIGNMENT\n", consumer.port)
-				fmt.Printf("├─ Group:      %d\n", consumer.groupID)
-				fmt.Printf("└─ Partitions: ")
-				for i, p := range consumer.assignment {
-					if i > 0 {
-						fmt.Print(", ")
-					}
-					fmt.Printf("P%d", p.partitionID)
-				}
-				fmt.Println()
-				err := WriteMessageToStream(stream_rw, &Message{ASSIGNMENT_ACK: &ack})
-				if err != nil {
-					return err
-				}
-				for _, p := range consumer.assignment {
-					err := consumer.fetchMessages(stream_rw, p.partitionID, p.offset)
-					if err != nil {
-						return err
-					}
-				}
-			}
-			if resp.FETCH_ACK != nil {
-				messageCount := 0
-				if resp.FETCH_ACK.generation != consumer.generation {
-					continue // phiên bản assingment của log message không khớp với phiên bản hiện tại của consumer, bỏ qua message này
-				}
-				if resp.FETCH_ACK.found {
-					for _, p := range consumer.assignment {
-						if p.partitionID == resp.FETCH_ACK.partitionID {
-							messageCount = int(resp.FETCH_ACK.nextOffset - p.offset)
-							break
-						}
-					}
-				}
-				fmt.Printf("[Consumer %d] FETCH_ACK\n", consumer.port)
-				fmt.Printf("├─ Partition: P%d\n", resp.FETCH_ACK.partitionID)
-				fmt.Printf("└─ Messages:  %d\n", messageCount)
-				err := consumer.handleFetchAck(stream_rw, resp.FETCH_ACK)
-				if err != nil {
-					return err
-				}
-			}
-			if resp.COMMIT_OFFSET_ACK != nil {
-				commitAck := resp.COMMIT_OFFSET_ACK
-				fmt.Printf("[Consumer %d] COMMIT_ACK\n", consumer.port)
-				fmt.Printf("├─ Partition: P%d\n", commitAck.partitionID)
-				fmt.Printf("└─ Committed: %d\n", commitAck.offset)
-				err := consumer.updateCommitedOffset(commitAck.partitionID, commitAck.offset)
-				if err != nil {
-					return err
-				}
-				err = consumer.fetchMessages(stream_rw, commitAck.partitionID, commitAck.offset)
-				if err != nil {
-					return err
-				}
-			}
+
+		conn, err := l.Accept()
+		if err != nil {
+			return err
 		}
 
+		err = consumer.handleBrokerConnection(conn)
+		conn.Close()
+
+		if err == ErrConsumerNoLongerInGroup {
+			printEvent("CONSUMER REJOINING", fmt.Sprintf("Consumer: %d", consumer.port), "Previous assignment expired", "Requesting a new group assignment")
+
+			continue
+		}
+		return err
 	}
+
 }
 
 func (consumer *Consumer) updateCommitedOffset(partitionID uint16, offset uint32) error {
@@ -182,12 +116,7 @@ func (consumer *Consumer) updateCommitedOffset(partitionID uint16, offset uint32
 	return errors.New("offset not found in pending commit")
 }
 
-func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
-	fmt.Printf("[Consumer %d] FETCH\n", consumer.port)
-	fmt.Printf("├─ Group:     %d\n", consumer.groupID)
-	fmt.Printf("├─ Partition: P%d\n", partitionID)
-	fmt.Printf("├─ Offset:    %d\n", offset)
-	fmt.Printf("└─ Max:       100\n")
+func (consumer *Consumer) fetchMessages(stream_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
 	Message := &Message{
 		FETCH: &Fetch{
 			partitionID: partitionID,
@@ -195,31 +124,16 @@ func (consumer *Consumer) fetchMessages(steam_rw *bufio.ReadWriter, partitionID 
 			generation:  consumer.generation,
 		},
 	}
-	return WriteMessageToStream(steam_rw, Message)
+	return WriteMessageToStream(stream_rw, Message)
 }
 
 func (consumer *Consumer) handleFetchAck(stream_rw *bufio.ReadWriter, resp *FetchAck) error {
-	if !resp.found {
-		fmt.Printf("[Consumer %d] FETCH_ACK\n", consumer.port)
-		fmt.Printf("├─ Partition: P%d\n", resp.partitionID)
-		fmt.Printf("├─ Offset:    %d\n", resp.nextOffset)
-		fmt.Printf("└─ Messages:  0\n")
-		fmt.Printf("   └─ No new messages -> retry in 1s\n")
+
+	if !resp.found { // Luôn retry sau 1 giây
 		time.Sleep(1 * time.Second)
-		return consumer.fetchMessages(stream_rw, resp.partitionID, resp.nextOffset)
+		return consumer.fetchMessages(stream_rw, resp.partitionID, resp.nextOffset) // gửi lại fetch
 	}
-	startOffset := resp.nextOffset - uint32(len(resp.data)/2)
-	messageCount := resp.nextOffset - startOffset
-	fmt.Printf("[Consumer %d] PROCESS\n", consumer.port)
-	fmt.Printf("├─ Partition: P%d\n", resp.partitionID)
-	fmt.Printf("├─ StartOffset: %d\n", startOffset)
-	fmt.Printf("├─ Messages:   %d\n", messageCount)
-	fmt.Printf("└─ NextOffset: %d\n", resp.nextOffset)
 	commitOffset := consumer.readMsgFromPartitionLog(resp.data, resp.nextOffset, resp.partitionID)
-	fmt.Printf("[Consumer %d] PROCESS_COMPLETE\n", consumer.port)
-	fmt.Printf("├─ Partition: P%d\n", resp.partitionID)
-	fmt.Printf("├─ Processed: %d\n", messageCount)
-	fmt.Printf("└─ NextOffset: %d\n", commitOffset)
 	return consumer.commitOffset(stream_rw, resp.partitionID, commitOffset)
 }
 
@@ -240,8 +154,7 @@ func (consumer *Consumer) readMsgFromPartitionLog(msg []byte, nextOffset uint32,
 		lenght := uint16(msg[pos])<<8 + uint16(msg[pos+1])
 		pos += 2                              // bỏ qua 2 byte độ dài của message
 		message := msg[pos : pos+int(lenght)] // lấy nội dùng message ra
-		fmt.Printf("\n    [Message %d] Offset: %d\n", i, currentOffset+i)
-		fmt.Printf("        %s\n", string(message))
+		printEvent(fmt.Sprintf("NEW MESSAGE %d", i), fmt.Sprintf("Partition: P%d", partitionID), fmt.Sprintf("Offset: %d", currentOffset+i), fmt.Sprintf("Payload: %s", string(message)))
 		commitOffset = currentOffset + i + 1 // cập nhật offset mới nhất đã đọc được + 1
 		consumer.assignment[partitionIDX].offset = commitOffset
 		pos += int(lenght)
@@ -251,17 +164,109 @@ func (consumer *Consumer) readMsgFromPartitionLog(msg []byte, nextOffset uint32,
 
 func (consumer *Consumer) commitOffset(stream_rw *bufio.ReadWriter, partitionID uint16, offset uint32) error {
 	consumer.pendingCommit[partitionID] = offset
-	fmt.Printf("[Consumer %d] COMMIT\n", consumer.port)
-	fmt.Printf("├─ Group:     %d\n", consumer.groupID)
-	fmt.Printf("├─ Partition: P%d\n", partitionID)
-	fmt.Printf("└─ Offset:    %d\n", offset)
+	printEvent(fmt.Sprintf("CONSUMER %d COMMIT", consumer.port), fmt.Sprintf("Group: %d", consumer.groupID), fmt.Sprintf("Partition: P%d", partitionID), fmt.Sprintf("Offset: %d", offset), fmt.Sprintf("Generation: %d", consumer.generation))
 	Message := &Message{
 		COMMIT_OFFSET: &CommitOffset{
 			TopicID:     consumer.topicID,
 			GroupID:     consumer.groupID,
 			PartitionID: partitionID,
 			Offset:      offset,
+			Generation:  consumer.generation,
 		},
 	}
 	return WriteMessageCommitOffsetToStream(stream_rw, COMMIT_OFFSET, Message.COMMIT_OFFSET)
+}
+
+func (consumer *Consumer) handleBrokerConnection(conn net.Conn) error {
+	stream_rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	for {
+		resp, err := ReadMessageFromStream(stream_rw)
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+		if resp == nil {
+			continue
+		} else {
+			if resp.ERROR_CONSUMER_NO_LONGER_IN_GROUP != nil {
+				printEvent("CONSUMER REMOVED FROM GROUP", fmt.Sprintf("Consumer: %d", consumer.port), "Waiting to rejoin")
+				return ErrConsumerNoLongerInGroup
+			}
+			if resp.ASSIGNMENT != nil {
+				consumer.assignment = resp.ASSIGNMENT.assignment
+				consumer.generation = resp.ASSIGNMENT.generation
+				consumer.pendingCommit = make(map[uint16]uint32)
+				if len(consumer.assignment) == 0 {
+					var ack = byte(1)
+					err := WriteMessageToStream(stream_rw, &Message{ASSIGNMENT_ACK: &ack})
+					if err != nil {
+						return err
+					}
+					continue
+				}
+				var ack = byte(1)
+				err := WriteMessageToStream(stream_rw, &Message{ASSIGNMENT_ACK: &ack})
+				if err != nil {
+					return err
+				}
+				for _, p := range consumer.assignment {
+					err := consumer.fetchMessages(stream_rw, p.partitionID, p.offset)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if resp.FETCH_ACK != nil {
+				if resp.FETCH_ACK.errCode != 0 {
+					switch resp.FETCH_ACK.errCode {
+					case ERR_NOT_ASSIGNED:
+
+						printEvent("FETCH REJECTED", fmt.Sprintf("Consumer: %d", consumer.port), fmt.Sprintf("Partition P%d is not assigned", resp.FETCH_ACK.partitionID))
+						continue
+
+					case ERR_ILLEGAL_GENERATION:
+
+						printEvent("FETCH REJECTED", fmt.Sprintf("Consumer: %d", consumer.port), fmt.Sprintf("Illegal generation for P%d", resp.FETCH_ACK.partitionID))
+						continue
+
+					case ERR_PARTITION_NOT_FOUND:
+
+						printEvent("FETCH REJECTED", fmt.Sprintf("Consumer: %d", consumer.port), fmt.Sprintf("Partition P%d not found", resp.FETCH_ACK.partitionID))
+						continue
+					default:
+						printEvent("FETCH REJECTED", fmt.Sprintf("Consumer: %d", consumer.port), fmt.Sprintf("Error %d for P%d", resp.FETCH_ACK.errCode, resp.FETCH_ACK.partitionID))
+						continue
+					}
+				}
+				if resp.FETCH_ACK.generation != consumer.generation {
+					continue // phiên bản assingment của log message không khớp với phiên bản hiện tại của consumer, bỏ qua message này
+				}
+				err := consumer.handleFetchAck(stream_rw, resp.FETCH_ACK)
+				if err != nil {
+					return err
+				}
+			}
+			if resp.COMMIT_OFFSET_ACK != nil {
+				commitAck := resp.COMMIT_OFFSET_ACK
+				if !commitAck.success {
+					printEvent("COMMIT REJECTED", fmt.Sprintf("Consumer: %d", consumer.port), fmt.Sprintf("Partition: P%d", commitAck.partitionID))
+					continue
+				}
+				if commitAck.generation != consumer.generation {
+					printEvent("STALE COMMIT ACK", fmt.Sprintf("Consumer: %d", consumer.port), fmt.Sprintf("ACK generation: %d", commitAck.generation), fmt.Sprintf("Current generation: %d", consumer.generation))
+					continue
+				}
+				printEvent(fmt.Sprintf("CONSUMER %d COMMIT ACK", consumer.port), fmt.Sprintf("Partition: P%d", commitAck.partitionID), fmt.Sprintf("Committed offset: %d", commitAck.offset))
+				err := consumer.updateCommitedOffset(commitAck.partitionID, commitAck.offset)
+				if err != nil {
+					return err
+				}
+				err = consumer.fetchMessages(stream_rw, commitAck.partitionID, commitAck.offset)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+	}
 }
