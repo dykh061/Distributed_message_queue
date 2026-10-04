@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 type Topic struct {
 	mu            sync.RWMutex
@@ -8,17 +11,21 @@ type Topic struct {
 	partitions    []*Partition
 	cgroups       []*ConsumerGroup
 	nextPartition uint32
+	dataDir       string
 }
 
-func (t *Topic) init(id uint16) {
+func (t *Topic) init(id uint16, dataDir string) error {
 	t.topicID = id
+	t.dataDir = dataDir
 	t.partitions = make([]*Partition, 3)
 	for i := range t.partitions {
-		t.partitions[i] = &Partition{}
-		t.partitions[i].init(uint16(i))
+		if err := t.partitions[i].init(uint16(i), t.dataDir, t.topicID); err != nil {
+			return fmt.Errorf("init partition %d for topic %d: %w", i, id, err)
+		}
 	}
 	t.cgroups = make([]*ConsumerGroup, 0)
 	t.nextPartition = 0
+	return nil
 }
 
 func (t *Topic) selectNextPartition() *Partition {

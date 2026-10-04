@@ -6,7 +6,7 @@
 - Topic được chia thành 3 partition cố định.
 - Consumer group nhận partition assignment theo round-robin.
 - Consumer fetch message theo offset, xử lý batch và commit offset về broker.
-- Broker lưu committed offset theo từng `topic / group / partition` trong bộ nhớ.
+- Broker lưu message của từng partition trong append-only log trên đĩa; committed offset vẫn được lưu trong bộ nhớ.
 
 Project được xây dựng để học về TCP protocol, topic/partition, consumer group, offset commit, rebalance và đồng bộ hoá state trong Go. Đây **không phải** Kafka-compatible broker và chưa phù hợp để dùng trong production.
 
@@ -31,9 +31,9 @@ Producer  ───────────────────────�
     ^                                                |
     | broker dial ngược lại producer                 | PCM
     +───────────────────────────────────────────────> Topic
-                                                      ├─ Partition 0 / Queue
-                                                      ├─ Partition 1 / Queue
-                                                      └─ Partition 2 / Queue
+                                                      ├─ Partition 0 / AppendOnlyLog
+                                                      ├─ Partition 1 / AppendOnlyLog
+                                                      └─ Partition 2 / AppendOnlyLog
 
                      CONSUMER_REGISTER
 Consumer  ──────────────────────────────────> Broker :10000
@@ -50,7 +50,7 @@ Mỗi producer hoặc consumer mở một TCP listener riêng, sau đó đăng k
 | --------------- | ------------------------------------------------------------------------------- |
 | `Broker`        | Lắng nghe đăng ký tại port `10000`, quản lý topic, partition và consumer group. |
 | `Topic`         | Có `topicID`, 3 partition cố định và danh sách consumer group.                  |
-| `Partition`     | Có `partitionID` và một queue in-memory riêng.                                  |
+| `Partition`     | Có `partitionID` và một append-only log riêng trên đĩa.                    |
 | `Producer`      | Đọc từng dòng từ `stdin`, gửi `PCM` vào topic đã đăng ký.                       |
 | `Consumer`      | Nhận assignment, fetch batch, xử lý message và commit offset.                   |
 | `ConsumerGroup` | Lưu consumer tham gia group và committed offset theo partition.                 |
@@ -118,7 +118,7 @@ go run . consumer 10003 1 10
 3. Broker tạo/tìm topic tương ứng và trả `RESPONSE_PRODUCER_REGISTER`.
 4. Broker dial ngược lại producer.
 5. Producer đọc từng dòng từ `stdin`, gửi `PCM`.
-6. Broker chọn partition kế tiếp theo round-robin (`nextPartition`), push message vào queue và trả `R_PCM`.
+6. Broker chọn partition kế tiếp theo round-robin (`nextPartition`), append message vào log của partition và trả `R_PCM`.
 
 ### Consumer → broker
 
@@ -213,29 +213,45 @@ Các hoạt động polling bình thường như fetch liên tục, partition r�
 | `producer.go`  | TCP producer và vòng lặp đọc `stdin`.                                 |
 | `consumer.go`  | TCP consumer, xử lý assignment/fetch/commit.                          |
 | `topic.go`     | Topic, round-robin partition selection và rebalance.                  |
-| `partition.go` | Partition và queue tương ứng.                                         |
+| `partition.go` | Partition và append-only log tương ứng.                               |
 | `cgroup.go`    | Consumer group, membership và offset theo partition.                  |
-| `queue.go`     | Ring-buffer in-memory, fetch theo logical offset.                     |
+| `appendOnlyLog.go` | Storage append-only theo segment, logical offset và recovery.       |
 | `message.go`   | Message model, framing và binary encoding.                            |
 
 ## Storage và giới hạn
 
-Queue hiện là ring buffer trong memory:
+Mỗi partition có một `AppendOnlyLog` riêng. Với broker chạy bằng:
 
 ```go
-ASLOT     = 255   // byte tối đa cho một slot
-SLOT_SIZE = 10000 // số slot trong một queue
+broker.init("logs")
 ```
 
-Mỗi partition có một `Queue` riêng với hai vùng array riêng: vùng data và vùng lưu độ dài message. Độ dài message trong queue được lưu bằng một `byte`, vì vậy payload tối đa là `255` byte. Không còn dùng buffer global chung giữa các partition/topic.
+message được lưu tại:
 
-Queue hiện có `10.000` slot nhưng chưa tự động từ chối khi đầy. Vì broker chưa gọi `pop` để giải phóng slot, không nên gửi quá sức chứa này trên một partition; nếu vượt quá, dữ liệu cũ có thể bị ghi đè và offset không còn đáng tin cậy.
+```text
+logs/topic-<topicID>/partition-<partitionID>/<baseOffset>.log
+```
 
-Một topic được tạo với **3 partition cố định**. Offset được lưu trong memory, vì vậy broker restart sẽ mất toàn bộ message, topic registry, membership consumer group và committed offset.
+Mỗi record có format:
+
+```text
++------------------+-------------------+
+| length: 4 bytes  | payload           |
++------------------+-------------------+
+```
+
+- `length` là độ dài payload dạng `uint32` big-endian.
+- Mỗi record nhận một logical offset tăng dần trong partition.
+- Segment mới được tạo khi segment hiện tại vượt `10 MiB`.
+- Khi mở lại log, broker quét các segment, dựng lại vị trí record và `nextOffset`.
+- Nếu phát hiện header hoặc payload bị ghi dở, phần record không hoàn chỉnh ở cuối file sẽ bị truncate trong recovery.
+- `fetchBatch` đọc tối đa số message được yêu cầu và dừng tại offset chưa tồn tại.
+
+Một topic được tạo với **3 partition cố định**. Message trong partition **không bị mất khi broker restart** nếu thư mục `logs` còn nguyên; topic và partition được tạo lại từ log khi có client đăng ký. Tuy nhiên, topic registry, membership consumer group và committed offset hiện vẫn được lưu trong memory nên sẽ mất sau restart.
 
 ## Concurrency
 
-Project dùng goroutine để xử lý connection producer/consumer và `sync.RWMutex` cho queue. Queue copy message trước khi trả về để caller không giữ reference vào buffer nội bộ sau khi unlock.
+Project dùng goroutine để xử lý connection producer/consumer. `Topic` bảo vệ round-robin partition selection bằng `sync.RWMutex`; mỗi `AppendOnlyLog` bảo vệ append/fetch và danh sách segment bằng `sync.RWMutex`.
 
 Các state cần được đồng bộ khi tiếp tục phát triển gồm:
 
@@ -247,16 +263,20 @@ Các state cần được đồng bộ khi tiếp tục phát triển gồm:
 Khi sửa concurrency, không copy struct đã chứa mutex. Ưu tiên lưu `*Topic`, `*ConsumerGroup`, `*Consumers` trong slice thay vì value struct. Kiểm tra bằng:
 
 ```bash
+go test ./...
 go vet ./...
-go run -race . broker
+CGO_ENABLED=1 go test -race ./...
 ```
+
+`go test -race` cần C compiler hỗ trợ CGO trên máy chạy test.
 
 ## Giới hạn hiện tại
 
 - Chỉ dành cho demo/local development; chưa có authentication, authorization hay TLS.
-- Queue chỉ lưu message tối đa `255` byte và chưa xử lý đầy queue một cách an toàn.
-- Không có persistence, replication, retention policy hoặc recovery sau restart.
+- Chưa có replication, retention policy hoặc cơ chế compact log.
 - Partition count cố định là 3.
+- Kích thước segment hiện cố định ở `10 MiB`; chưa có cấu hình qua CLI hoặc environment.
+- Chưa có giới hạn payload riêng ở storage layer; protocol `FETCH_ACK` vẫn giới hạn message trả về ở `uint16`.
 - Không có heartbeat hoặc session timeout; broker phát hiện consumer mất kết nối chủ yếu khi thao tác đọc connection lỗi.
 - Broker có kiểm tra generation để từ chối fetch và commit stale sau rebalance, nhưng commit chưa kiểm tra đầy đủ partition được assign và giới hạn offset hợp lệ.
 - Retry fetch rỗng hiện dùng `time.Sleep`, làm event loop consumer tạm dừng.
@@ -265,12 +285,13 @@ go run -race . broker
 
 ## Hướng phát triển đề xuất
 
-1. Thêm kiểm tra đầy queue và validate payload tối đa `255` byte trước khi push.
+1. Thêm validate payload và giới hạn kích thước record ở storage layer.
 2. Serialize write cho mỗi connection và thêm shutdown/disconnect handling.
 3. Validate consumer assignment, partition tồn tại và offset hợp lệ trước khi nhận commit.
 4. Thêm heartbeat/session timeout cho consumer group.
-5. Thêm persistence cho log và committed offset.
-6. Viết unit test cho queue overflow, protocol codec, rebalance, commit validation và integration test producer/broker/consumer.
+5. Persistence committed offset và metadata topic/group.
+6. Thêm retention, replication và cấu hình segment size.
+7. Viết unit test cho append/recovery, protocol codec, rebalance, commit validation và integration test producer/broker/consumer.
 
 ## License
 

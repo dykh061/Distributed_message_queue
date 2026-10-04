@@ -15,7 +15,7 @@ func main() {
 	switch os.Args[1] {
 	case "broker":
 		broker := &Broker{}
-		broker.init()
+		broker.init("logs")
 		err := broker.StartBrokerServer()
 		if err != nil {
 			fmt.Println("Error starting broker server: ", err)

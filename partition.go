@@ -1,13 +1,19 @@
 package main
 
+import "fmt"
+
 type Partition struct {
 	partitionID uint16
-	offset      uint32
-	mq          Queue
+	log         *AppendOnlyLog
 }
 
-func (p *Partition) init(id uint16) {
+func (p *Partition) init(id uint16, dataDir string, topicID uint16) error {
 	p.partitionID = id
-	p.offset = 0
-	p.mq.init()
+	path := fmt.Sprintf("%s/topic-%d/partition-%d", dataDir, topicID, id)
+	log, err := OpenAppendOnlyLog(path)
+	if err != nil {
+		return err
+	}
+	p.log = log
+	return nil
 }

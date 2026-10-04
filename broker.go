@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"sync"
 )
@@ -12,12 +13,14 @@ import (
 const BROKER_PORT = 10000
 
 type Broker struct {
-	mu     sync.RWMutex
-	topics []*Topic
+	mu      sync.RWMutex
+	topics  []*Topic
+	dataDir string
 }
 
-func (broker *Broker) init() {
+func (broker *Broker) init(dataDir string) {
 	broker.topics = make([]*Topic, 0)
+	broker.dataDir = dataDir
 }
 
 // Khởi động server broker và lắng nghe các kết nối đến port
@@ -92,7 +95,14 @@ func (broker *Broker) processProducerPCM(pcm_message []byte, topic *Topic) (*byt
 		err := errors.New("No partition available for topic")
 		return nil, err
 	}
-	partition.mq.push(pcm_message)
+	_, err := partition.log.append(pcm_message)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"append message to partition %d: %w",
+			partition.partitionID,
+			err,
+		)
+	}
 	printEvent("MESSAGE ROUTED", fmt.Sprintf("Topic: %d", topic.topicID), fmt.Sprintf("Partition: P%d", partition.partitionID))
 	var ack byte = 0
 	return &ack, nil
@@ -108,7 +118,9 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 	var topic *Topic = nil
 	if len(broker.topics) == 0 {
 		ntopic := &Topic{}
-		ntopic.init(consumer_register_message.topicID)
+		if err := ntopic.init(consumer_register_message.topicID, broker.dataDir); err != nil {
+			return nil, fmt.Errorf("initialize topic %d: %w", consumer_register_message.topicID, err)
+		}
 		broker.topics = append(broker.topics, ntopic)
 		topic_idx = len(broker.topics) - 1
 	} else {
@@ -120,7 +132,9 @@ func (broker *Broker) processConsumerGroupConsump(consumer_register_message *Con
 		}
 		if topic_idx == -1 {
 			ntopic := &Topic{}
-			ntopic.init(consumer_register_message.topicID)
+			if err := ntopic.init(consumer_register_message.topicID, broker.dataDir); err != nil {
+				return nil, fmt.Errorf("initialize topic %d: %w", consumer_register_message.topicID, err)
+			}
 			broker.topics = append(broker.topics, ntopic)
 			topic_idx = len(broker.topics) - 1
 		}
@@ -342,7 +356,37 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, cons
 					continue
 				}
 
-				messages, nextOffset, found := topic.partitions[partitionIDX].mq.fetchMessage(uint16(100), resp.FETCH.offset)
+				batch, err := topic.partitions[partitionIDX].log.fetchBatch(
+					uint64(resp.FETCH.offset),
+					100,
+				)
+				if err != nil && !errors.Is(err, ErrOffsetNotFound) {
+					topic.mu.RUnlock()
+					return err
+				}
+				messages := make([]byte, 0)
+				nextOffset := resp.FETCH.offset
+
+				for _, message := range batch {
+					if len(message) > math.MaxUint16 {
+						topic.mu.RUnlock()
+						return fmt.Errorf(
+							"message at partition %d exceeds protocol limit",
+							partitionID,
+						)
+					}
+
+					length := uint16(len(message))
+					messages = append(
+						messages,
+						byte(length>>8),
+						byte(length),
+					)
+					messages = append(messages, message...)
+					nextOffset++
+				}
+
+				found := len(batch) > 0
 				fetch_ack := &Message{
 					FETCH_ACK: &FetchAck{
 						partitionID: topic.partitions[partitionIDX].partitionID,
@@ -402,7 +446,9 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 	var topic_idx int = -1
 	if len(broker.topics) == 0 {
 		ntopic := &Topic{}
-		ntopic.init(producer_register_message.topicID)
+		if err := ntopic.init(producer_register_message.topicID, broker.dataDir); err != nil {
+			return nil, fmt.Errorf("initialize topic %d: %w", producer_register_message.topicID, err)
+		}
 		broker.topics = append(broker.topics, ntopic)
 		topic_idx = len(broker.topics) - 1
 	} else {
@@ -414,7 +460,9 @@ func (broker *Broker) processProducerRegisterMessage(producer_register_message *
 		}
 		if topic_idx == -1 {
 			ntopic := &Topic{}
-			ntopic.init(producer_register_message.topicID)
+			if err := ntopic.init(producer_register_message.topicID, broker.dataDir); err != nil {
+				return nil, fmt.Errorf("initialize topic %d: %w", producer_register_message.topicID, err)
+			}
 			broker.topics = append(broker.topics, ntopic)
 			topic_idx = len(broker.topics) - 1
 		}
