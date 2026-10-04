@@ -264,11 +264,17 @@ Khi sửa concurrency, không copy struct đã chứa mutex. Ưu tiên lưu `*To
 
 ```bash
 go test ./...
+go build .
 go vet ./...
 CGO_ENABLED=1 go test -race ./...
 ```
 
 `go test -race` cần C compiler hỗ trợ CGO trên máy chạy test.
+Trong PowerShell, dùng `$env:CGO_ENABLED=1; go test -race ./...` thay cho cú pháp
+`CGO_ENABLED=1 go test -race ./...` của shell kiểu Unix.
+Các lệnh trên phải được chạy từ thư mục gốc project để Go biên dịch toàn bộ package. Không dùng
+`go test topic.go` hoặc `go build topic.go`, vì các lệnh này chỉ nạp một file và sẽ không thấy
+các kiểu được định nghĩa trong những file `.go` còn lại.
 
 ## Giới hạn hiện tại
 

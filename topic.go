@@ -19,6 +19,7 @@ func (t *Topic) init(id uint16, dataDir string) error {
 	t.dataDir = dataDir
 	t.partitions = make([]*Partition, 3)
 	for i := range t.partitions {
+		t.partitions[i] = &Partition{}
 		if err := t.partitions[i].init(uint16(i), t.dataDir, t.topicID); err != nil {
 			return fmt.Errorf("init partition %d for topic %d: %w", i, id, err)
 		}
