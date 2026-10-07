@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,135 +11,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
-// const (
-// 	ASLOT     = 255   // mỗi slot có 255 byte dữ liệu
-// 	SLOT_SIZE = 10000 // tổng số slot là 10000 slot
-// )
-
-// type Queue struct {
-// 	mu         sync.RWMutex
-// 	arr        [ASLOT * SLOT_SIZE]byte // mảng lưu trữ message queue, tổng cộng có 10000 slot , mỗi slot có 255 byte dữ liệu
-// 	Size       [ASLOT * SLOT_SIZE]byte // mảng lưu trữ kích thước của message queue cho mỗi slot
-// 	head       uint32
-// 	tail       uint32
-// 	count      uint32
-// 	baseOffset uint64
-// }
-
-// func (q *Queue) init() {
-// 	q.head = 0
-// 	q.tail = 0
-// 	q.count = 0
-// 	q.baseOffset = 0
-// }
-
-// func (q *Queue) push(data []byte) {
-// 	q.mu.Lock()
-// 	defer q.mu.Unlock()
-// 	copy(q.arr[q.tail:q.tail+uint32(len(data))], data) // copy dữ liệu data vào mảng arr tại vị trí tail
-// 	q.Size[q.tail] = byte(len(data))
-// 	q.count++
-// 	q.tail += 255
-// 	q.tail %= ASLOT * SLOT_SIZE
-// }
-
-// func (q *Queue) getCount() uint32 {
-// 	q.mu.RLock()
-// 	defer q.mu.RUnlock()
-// 	return q.count
-// }
-// func (q *Queue) pop() []byte {
-// 	q.mu.Lock()
-// 	defer q.mu.Unlock()
-// 	if q.count == 0 {
-// 		return nil
-// 	}
-// 	size := uint32(q.Size[q.head]) // lấy kích thước của message queue tại vị trí head
-// 	data := make([]byte, size)
-// 	copy(data, q.arr[q.head:q.head+size])
-// 	q.count--
-// 	q.head += 255
-// 	q.head %= ASLOT * SLOT_SIZE
-// 	q.baseOffset += 1
-// 	return data
-// }
-
-// func (q *Queue) peek(offset uint) []byte {
-// 	q.mu.RLock()
-// 	defer q.mu.RUnlock()
-// 	if offset >= uint(q.count) {
-// 		return nil
-// 	}
-// 	posision := q.head + uint32(offset)*ASLOT
-// 	posision %= ASLOT * SLOT_SIZE
-// 	size := uint32(q.Size[posision])
-// 	data := make([]byte, size)
-// 	copy(data, q.arr[posision:posision+size])
-// 	return data
-// }
-
-// func (q *Queue) peekLocked(offset uint) []byte { // hàm này được dùng khi đã lock mutex bên ngoài, mục đích tránh deadlock
-// 	if offset >= uint(q.count) {
-// 		return nil
-// 	}
-// 	posision := q.head + uint32(offset)*ASLOT
-// 	posision %= ASLOT * SLOT_SIZE
-// 	size := uint32(q.Size[posision])
-// 	data := make([]byte, size)
-// 	copy(data, q.arr[posision:posision+size])
-// 	return data
-// }
-
-// func (q *Queue) fetchMessage(maxMessages uint16, offset uint32) (data []byte, nextOffset uint32, found bool) {
-// 	q.mu.RLock()
-// 	defer q.mu.RUnlock()
-// 	if q.count == 0 {
-// 		return nil, offset, false
-// 	}
-
-// 	// Ví dụ base = 100, count = 3 → log chứa 100, 101, 102.
-// 	// maxLogicOffset = 103.
-// 	maxLogicOffset := q.baseOffset + uint64(q.count)
-
-// 	// offset nhỏ hơn baseOffset: record đã bị retention xoá.
-// 	// offset >= maxLogicOffset: chưa có record mới.
-// 	if uint64(offset) < q.baseOffset || uint64(offset) >= maxLogicOffset {
-// 		return nil, offset, false
-// 	}
-
-// 	remaining := maxLogicOffset - uint64(offset)
-// 	readCount := uint64(maxMessages)
-// 	if readCount > remaining {
-// 		readCount = remaining
-// 	}
-// 	nextOffset = offset
-// 	var messages []byte
-
-// 	for i := uint64(0); i < readCount; i++ {
-// 		relativeOffset := nextOffset - uint32(q.baseOffset)
-// 		msg := q.peekLocked(uint(relativeOffset))
-// 		lengthmsg := uint16(len(msg))
-// 		first := byte(lengthmsg >> 8)
-// 		last := byte(lengthmsg & 0xff)
-// 		messages = append(messages, first, last)
-// 		messages = append(messages, msg...)
-// 		nextOffset++
-// 	}
-// 	return messages, nextOffset, true
-// }
-
+var ErrLogClosed = errors.New("log is closed")
 var ErrOffsetNotFound = errors.New("offset not found")
 
 type segment struct {
-	file       *os.File //  File vật lý của segment này trên disk.
-	positions  []int64  // vị trí byte bắt đầu của mỗi message trong file
+	file       *os.File      //  File vật lý của segment này trên disk.
+	writer     *bufio.Writer // vùng đệm ghi dữ liệu
+	positions  []int64       // vị trí byte bắt đầu của mỗi message trong file
 	baseOffset uint64
 	// baseOffset không lưu "vị trí", mà lưu offset đầu tiên của segment đó trong toàn bộ partition.
 	// Ví dụ partition có giới hạn 100 message/segment.
 	// thì cái segment đầu tiên baseOffset =0, cái segment thứ 2 baseOffset = 100, cái segment thứ 3 baseOffset = 200
-	size int64 // kích thước hiện tại của segment
+	size     int64 // kích thước hiện tại của segment
+	syncSize int64 // kích thước đã được sync xuống đĩa vật lý
 }
 type AppendOnlyLog struct {
 	mu         sync.RWMutex
@@ -146,9 +34,19 @@ type AppendOnlyLog struct {
 	segments   []*segment // danh sách tất cả segment của partition này
 	active     *segment   // segment hiện tại đang nhận dữ liệu mới
 	nextOffset uint64
+
+	closed bool // true nếu log đã bị đóng, false nếu log vẫn còn mở
 	//  Logical offset sẽ được cấp cho MESSAGE TIẾP THEO. Đây không phải vị trí byte mà là vị trí số
 	// for example đang có offset 1 2 thì nextOffset kế tiếp là 3 là vị trí số của message tiếp theo
 	maxSegmentSize int64 //Kích thước tối đa của MỘT segment, tính bằng BYTE.
+
+	// Quản lý background flusher
+	stopFlusher chan struct{} // channel để báo cho background flusher dừng lại cho luồng chính dùng
+	flusherDone chan struct{} // channel để gourutine báo cho luồng chính biết là đã dừng xong
+	// dùng struct vì struct{}{} không tốn bộ nhớ 0 byte, còn nếu dùng bool thì sẽ tốn 1 byte
+	// 2 channel này chỉ đóng vai trò bộ đàm để liên lạc cho 2 luồng
+	flushErr error // lưu trữ lỗi nếu có xảy ra trong background flusher
+	stopOnce sync.Once
 }
 
 // permision của directory là 0755 => số 0 nói về số này nằm ở hệ bát phân
@@ -191,7 +89,7 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 	// Vì tên file là zero-padded 12 chữ số (000000000000.log),
 	// sắp xếp alphabet = sắp xếp theo baseOffset tăng dần.
 
-	if len(logFiles) == 0 {
+	if len(logFiles) == 0 { // nếu chưa có file log nào thì tạo segment mới
 		segment, err := log.createSegment(0)
 		if err != nil {
 			return nil, err
@@ -200,6 +98,7 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 		log.segments = append(log.segments, segment)
 		log.active = segment
 
+		log.startBackgroundFlusher(50 * time.Millisecond)
 		return log, nil
 	}
 
@@ -217,6 +116,7 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 		}
 		seg := &segment{
 			file:       file,
+			writer:     nil, // các segment cũ không cần writer vì chỉ đọc dữ liệu, segment active mới cần writer
 			positions:  make([]int64, 0),
 			baseOffset: baseOffset,
 			size:       0,
@@ -227,6 +127,7 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 			_ = file.Close()
 			return nil, err
 		}
+		seg.syncSize = seg.size                  // khi recover xong thì syncSize = size vì lúc này dữ liệu đã được ghi xuống đĩa vật lý hết
 		log.segments = append(log.segments, seg) // có thêm segment vào danh sách khi for hết file thì segments sẽ có đủ tất cả segment
 
 		// Cập nhật nextOffset = baseOffset + số message đã recover trong segment
@@ -234,6 +135,13 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 	}
 	// 5. Segment cuối cùng là active
 	log.active = log.segments[len(log.segments)-1] // có đủ active
+
+	// nếu segment củ được load từ file lên nó chưa có writer nên phải tạo writer mới cho nó để ghi dữ liệu tiếp theo
+	if log.active.writer == nil {
+		log.active.writer = bufio.NewWriterSize(log.active.file, 64*1024) // 64KB buffer
+	}
+
+	log.startBackgroundFlusher(50 * time.Millisecond)
 	return log, nil
 }
 
@@ -330,6 +238,7 @@ func (log *AppendOnlyLog) createSegment(baseOffset uint64) (*segment, error) {
 
 	return &segment{
 		file:       file,
+		writer:     bufio.NewWriterSize(file, 64*1024), // 64KB buffer
 		positions:  make([]int64, 0),
 		baseOffset: baseOffset,
 		size:       0,
@@ -337,6 +246,17 @@ func (log *AppendOnlyLog) createSegment(baseOffset uint64) (*segment, error) {
 }
 
 func (log *AppendOnlyLog) rollSegment() error { // tạo segment mới khi segment hiện tại đã đầy
+	if log.active != nil && log.active.writer != nil {
+		err := log.active.writer.Flush()
+		if err != nil {
+			return err
+		}
+		err = log.active.file.Sync()
+		if err != nil {
+			return err
+		}
+		log.active.writer = nil // giải phóng RAM buffer 64KB của segment cũ
+	}
 
 	newSegment, err := log.createSegment(log.nextOffset)
 	// tạo segment mới với baseOffset = nextOffset ý là offset bắt đầu của segment mới sẽ là offset tiếp theo của segment này
@@ -355,17 +275,35 @@ func (log *AppendOnlyLog) rollSegment() error { // tạo segment mới khi segme
 }
 
 func (log *AppendOnlyLog) Close() error {
+	log.stopBackgroundFlusher() // dừng background flusher trước khi đóng file
 	log.mu.Lock()
 	defer log.mu.Unlock()
-	for _, seg := range log.segments {
-		_ = seg.file.Close()
+
+	if log.closed {
+		return nil
 	}
-	return nil
+	log.closed = true // đánh dấu log đã đóng để các goroutine khác không được phép ghi dữ liệu nữa
+	var errs []error
+	if log.flushErr != nil {
+		errs = append(errs, fmt.Errorf("background flush error: %w", log.flushErr))
+	}
+	for _, seg := range log.segments {
+		err := seg.file.Close()
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 func (log *AppendOnlyLog) append(data []byte) (uint64, error) {
 	log.mu.Lock()
 	defer log.mu.Unlock()
 
+	if log.closed {
+		return 0, ErrLogClosed
+	}
+
+	if log.flushErr != nil {
+		return 0, fmt.Errorf("background flush error: %w", log.flushErr)
+	}
 	recordSize := int64(4 + len(data)) // 4 byte đầu tiên lưu kích thước của message, sau đó là dữ liệu message
 
 	if log.active.size+recordSize > log.maxSegmentSize {
@@ -390,7 +328,7 @@ func (log *AppendOnlyLog) append(data []byte) (uint64, error) {
 	copy(record[4:], data)
 
 	// Ghi toàn bộ record xuống file
-	n, err := log.active.file.Write(record)
+	n, err := log.active.writer.Write(record)
 	if err != nil {
 		return 0, err
 	}
@@ -406,18 +344,13 @@ func (log *AppendOnlyLog) append(data []byte) (uint64, error) {
 	return offset, nil
 }
 
-func (log *AppendOnlyLog) fetch(offset uint64) ([]byte, error) {
-	log.mu.RLock()
-	defer log.mu.RUnlock()
-	return log.fetchOne(offset)
-}
+func (log *AppendOnlyLog) fetchOneLocked(offset uint64) ([]byte, error) {
 
-func (log *AppendOnlyLog) fetchOne(offset uint64) ([]byte, error) {
-
-	segment, err := log.findSegment(offset)
+	segment, err := log.findSegmentLocked(offset)
 	if err != nil {
 		return nil, err
 	}
+
 	index := offset - segment.baseOffset
 	// tính toán vị trí của message trong segment hiện tại,
 	// ví dụ segment có baseOffset = 100, offset = 102 thì index = 2, tức là message thứ 2 trong segment
@@ -448,7 +381,7 @@ func (log *AppendOnlyLog) fetchOne(offset uint64) ([]byte, error) {
 
 }
 
-func (log *AppendOnlyLog) findSegment(offset uint64) (*segment, error) {
+func (log *AppendOnlyLog) findSegmentLocked(offset uint64) (*segment, error) {
 	for i := len(log.segments) - 1; i >= 0; i-- {
 		segment := log.segments[i]
 		if segment.baseOffset <= offset {
@@ -464,10 +397,30 @@ func (log *AppendOnlyLog) findSegment(offset uint64) (*segment, error) {
 
 func (log *AppendOnlyLog) fetchBatch(offset uint64, maxMessages int) ([][]byte, error) {
 	log.mu.RLock()
+	if log.closed {
+		log.mu.RUnlock()
+		return nil, ErrLogClosed
+	}
+	//Kiểm tra nhanh bằng RLock xem có cần Flush active segment không
+	needflush := (log.active != nil && log.active.writer != nil && offset+uint64(maxMessages) > log.active.baseOffset && log.active.writer.Buffered() > 0)
+	log.mu.RUnlock()
+
+	if needflush {
+		log.mu.Lock()
+		// Double-check: kiểm tra lại xem trong lúc chờ lock, goroutine khác đã flush chưa
+		if log.active != nil && log.active.writer != nil && log.active.writer.Buffered() > 0 {
+			if err := log.active.writer.Flush(); err != nil {
+				log.mu.Unlock()
+				return nil, err
+			}
+		}
+		log.mu.Unlock() // nhả lock
+	}
+	log.mu.RLock()
 	defer log.mu.RUnlock()
 	messages := make([][]byte, 0, maxMessages)
 	for i := 0; i < maxMessages; i++ {
-		data, err := log.fetchOne(offset + uint64(i))
+		data, err := log.fetchOneLocked(offset + uint64(i))
 		if err != nil {
 			if errors.Is(err, ErrOffsetNotFound) {
 				break
@@ -477,4 +430,61 @@ func (log *AppendOnlyLog) fetchBatch(offset uint64, maxMessages int) ([][]byte, 
 		messages = append(messages, data)
 	}
 	return messages, nil
+}
+
+func (log *AppendOnlyLog) startBackgroundFlusher(interval time.Duration) {
+	log.stopFlusher = make(chan struct{})
+	log.flusherDone = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		defer close(log.flusherDone)
+		flushActive := func() {
+			// tạo ra 1 biến flushActive chứa 1 func để gọi flushActive() khi ticker hoặc stopFlusher channel nhận được sự kiện
+			// flush / write / và sync khác nhau thế nào:
+			// wrrite chỉ là ghi vào buffer của go
+			// flush là đẩy từ ram project xuống ram hệ điều hành (OS Page Cache)
+			// sync là đẩy từ ram hệ điều hành xuống đĩa vật lý
+			log.mu.Lock()
+			defer log.mu.Unlock()
+
+			// nếu không có active segment hoặc không có writer thì không cần flush
+			if log.active == nil || log.active.writer == nil {
+				return
+			}
+
+			if err := log.active.writer.Flush(); err != nil {
+				log.flushErr = err
+				return
+			}
+
+			if log.active.size > log.active.syncSize {
+				// Đẩy từ OS Page Cache xuống đĩa vật lý
+				if err := log.active.file.Sync(); err == nil {
+					log.active.syncSize = log.active.size
+				} else {
+					log.flushErr = err
+				}
+			}
+
+		}
+		for { // vòng lặp đứng chờ sự kiện từ ticker hoặc stopFlusher channel
+			select {
+			case <-ticker.C: // mỗi khi đủ thời gian interval thì gọi flushActive() để flush dữ liệu xuống đĩa
+				flushActive()
+			case <-log.stopFlusher: // nếu chương trình dừng lại thì gọi flushActive() để flush dữ liệu xuống đĩa trước khi dừng
+				flushActive()
+				return
+			}
+		}
+	}()
+}
+
+func (log *AppendOnlyLog) stopBackgroundFlusher() {
+	log.stopOnce.Do(func() {
+		if log.stopFlusher != nil {
+			close(log.stopFlusher)
+			<-log.flusherDone
+		}
+	})
 }
