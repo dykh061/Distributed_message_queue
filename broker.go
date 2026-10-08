@@ -368,7 +368,8 @@ func (broker *Broker) handleConsumerConnection(stream_rw *bufio.ReadWriter, cons
 				nextOffset := resp.FETCH.offset
 
 				for _, message := range batch {
-					if len(message) > math.MaxUint16 {
+					if len(message) > math.MaxUint16 { // kiểm tra độ dài của message có vượt quá giới hạn của protocol hay không
+						// giới hạn là 65535 byte, nếu vượt quá thì sẽ trả về lỗi
 						topic.mu.RUnlock()
 						return fmt.Errorf(
 							"message at partition %d exceeds protocol limit",

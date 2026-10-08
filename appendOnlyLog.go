@@ -81,12 +81,13 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 	var logFiles []string
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".log") {
+			// HasSuffix kiểm tra xem tên file có kết thúc bằng Suffix = ".log" không
 			logFiles = append(logFiles, entry.Name())
 		}
 	}
 
 	sort.Strings(logFiles)
-	// Vì tên file là zero-padded 12 chữ số (000000000000.log),
+	// Vì tên file là zero-padded 12 chữ số bao gồm baseOffset trong đó mà baseOffset là offset bắt đầu của 1 segment  (000000000000.log),
 	// sắp xếp alphabet = sắp xếp theo baseOffset tăng dần.
 
 	if len(logFiles) == 0 { // nếu chưa có file log nào thì tạo segment mới
@@ -102,14 +103,14 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 		return log, nil
 	}
 
-	// recoer từng segment
+	// nếu có file log thì dựng lại từng segment
 	for _, filename := range logFiles {
 		// Parse baseOffset từ tên file: "000000000150.log" → 150
 		baseOffset, err := parseBaseOffset(filename)
 		if err != nil {
 			return nil, err
 		}
-		filepath := fmt.Sprintf("%s/%s", dir, filename)
+		filepath := fmt.Sprintf("%s/%s", dir, filename) // dựng lại đường dẫn đầy đủ tới file log
 		file, err := os.OpenFile(filepath, os.O_RDWR|os.O_APPEND, 0644)
 		if err != nil {
 			return nil, err
@@ -148,7 +149,7 @@ func OpenAppendOnlyLog(dir string) (*AppendOnlyLog, error) {
 // recoverSegment đọc file segment từ đầu đến cuối, dựng lại positions[].
 // Nếu gặp record bị ghi dở (partial write do crash), cắt bỏ phần dở.
 func recoverSegment(seg *segment) error {
-	// lấy cấc thông tin
+	// file.Stat() lấy cấc thông tin
 	// 	info.Size()      // kích thước file, tính bằng byte
 	// info.Name()      // tên file
 	// info.ModTime()   // thời gian sửa đổi
@@ -165,22 +166,19 @@ func recoverSegment(seg *segment) error {
 		// Cần ít nhất 4 byte cho length header
 		if position+4 > fileSize {
 			// Header bị ghi dở → cắt bỏ
-			fmt.Printf("[recover] truncating partial header at byte %d\n", position)
 			if err := seg.file.Truncate(position); err != nil { // cắt file tại vị trí position, xóa bỏ phần dở phía sau
 				return err
 			}
 			break
 		}
-		// Đọc 4 byte length
 		lengthBytes := make([]byte, 4)
-		_, err := seg.file.ReadAt(lengthBytes, position) // đọc 4 byte từ file tại vị trí position
+		_, err := seg.file.ReadAt(lengthBytes, position) // đọc 4 byte từ file tại vị trí position ; tương ứng với 4 byte chứa lenght của message
 		if err != nil {
 			return err
 		}
 		length := binary.BigEndian.Uint32(lengthBytes) // chuyển 4 byte đó thành số nguyên uint32 để biết độ dài của message
 		if length == 0 {
 			// Record có length = 0 là bất hợp lệ, cắt bỏ
-			fmt.Printf("[recover] truncating zero-length record at byte %d\n", position)
 			if err := seg.file.Truncate(position); err != nil {
 				return err
 			}
@@ -190,10 +188,6 @@ func recoverSegment(seg *segment) error {
 		if recordEnd > fileSize {
 			// Payload bị ghi dở → cắt bỏ record này
 			// Ví dụ: length nói payload 100 byte nhưng file chỉ còn 50 byte
-			fmt.Printf(
-				"[recover] truncating partial record at byte %d (expected %d bytes, file has %d)\n",
-				position, length, fileSize-position-4,
-			)
 			if err := seg.file.Truncate(position); err != nil {
 				return err
 			}
@@ -204,16 +198,15 @@ func recoverSegment(seg *segment) error {
 		position = recordEnd
 	}
 	seg.size = position
-	// position luôn đại diện cho vị trí bắt đầu của record tiếp theo,
+	// do position = recordEnd nên là position luôn đại diện cho vị trí bắt đầu của record tiếp theo,
 	// hoặc điểm kết thúc của phần dữ liệu hợp lệ. Vì vậy sau khi scan xong, seg.size = position.
 	return nil
 }
 
 // parseBaseOffset chuyển tên file "000000000150.log" → uint64(150)
 func parseBaseOffset(filename string) (uint64, error) {
-	// Cắt bỏ đuôi ".log"
-	name := strings.TrimSuffix(filename, ".log")
-	return strconv.ParseUint(name, 10, 64)
+	name := strings.TrimSuffix(filename, ".log") // Cắt bỏ đuôi ".log"
+	return strconv.ParseUint(name, 10, 64)       // chuyển file name  từ hệ thập phân sang uint64
 }
 
 func (log *AppendOnlyLog) createSegment(baseOffset uint64) (*segment, error) {
@@ -222,6 +215,7 @@ func (log *AppendOnlyLog) createSegment(baseOffset uint64) (*segment, error) {
 		log.dir,
 		baseOffset,
 	)
+	// kết quả của dòng này sẽ là ví dụ : D:/kafka/topic-1/partition-0/000000000123.log
 
 	file, err := os.OpenFile(
 		filename,
@@ -291,8 +285,10 @@ func (log *AppendOnlyLog) Close() error {
 		err := seg.file.Close()
 		errs = append(errs, err)
 	}
-	return errors.Join(errs...)
+	return errors.Join(errs...) // errors.Join gom tất cả các lỗi trong slice errs thành 1 lỗi duy nhất ngăn cách bởi \n
 }
+
+// ghi dữ liệu vào segment hiện tại
 func (log *AppendOnlyLog) append(data []byte) (uint64, error) {
 	log.mu.Lock()
 	defer log.mu.Unlock()
