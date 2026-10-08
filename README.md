@@ -47,7 +47,6 @@
 - [Cấu trúc Thư mục & Mã nguồn](#-cấu-trúc-thư-mục--mã-nguồn)
 - [Cài đặt & Hướng dẫn sử dụng](#-cài-đặt--hướng-dẫn-sử-dụng)
 - [Mô hình Đa luồng & An toàn Dữ liệu](#-mô-hình-đa-luồng--an-toàn-dữ-liệu)
-- [So sánh với Apache Kafka](#-so-sánh-với-apache-kafka)
 - [Giới hạn & Định hướng Phát triển](#-giới-hạn--định-hướng-phát-triển)
 
 ---
@@ -414,22 +413,6 @@ DistributedMQ áp dụng các giải pháp thiết kế đồng thời nhằm t�
    # Dành cho Linux / macOS:
    CGO_ENABLED=1 go test -race ./...
    ```
-
----
-
-## ⚖ So sánh với Apache Kafka
-
-| Đặc điểm thiết kế | Apache Kafka | DistributedMQ |
-| :--- | :--- | :--- |
-| **Mô hình lưu trữ** | Log ghi nối tiếp (Commit Log) trên ổ đĩa | Log ghi nối tiếp theo phân đoạn (Append-Only Segment) trên ổ đĩa |
-| **Phân chia tệp lưu trữ** | Cắt phân đoạn theo dung lượng (1GB) hoặc thời gian | Cắt phân đoạn tự động theo dung lượng cố định (10MB) |
-| **Cơ chế chỉ mục vị trí** | Sử dụng file chỉ mục riêng trên đĩa (`.index`) | Lưu trữ bảng chỉ mục vị trí byte trực tiếp trong RAM |
-| **Tối ưu hóa ghi đĩa** | Dựa hoàn toàn vào bộ nhớ đệm của Linux (Page Cache) | Bộ đệm ứng dụng (64KB) kết hợp tiến trình Flusher định kỳ và Page Cache |
-| **Mô hình nhận dữ liệu** | Kéo dữ liệu theo lô chủ động (Pull-based) | Kéo dữ liệu theo lô chủ động (Pull-based theo từng Batch) |
-| **Tái cân bằng nhóm** | Giao thức phối hợp nhóm (Group Coordinator Protocol) | Thuật toán chia đều theo vòng tròn kết hợp bộ đếm thế hệ |
-| **Đảm bảo phân phát** | Tùy chọn đa dạng (At-least-once, Exactly-once) | **Ít nhất một lần (At-least-once)**: Đọc $\rightarrow$ Xử lý $\rightarrow$ Commit |
-| **Nơi lưu trữ Offset** | Lưu trong topic nội bộ đặc biệt trên đĩa | Lưu trong bộ nhớ RAM của Broker (`ConsumerGroup.offset` - chưa persistent qua restart) |
-| **Quy mô triển khai** | Cụm phân tán nhiều máy chủ với giao thức đồng thuận | Máy chủ đơn nút (Thiết kế tinh gọn phục vụ mục đích học tập) |
 
 ---
 
